@@ -64,6 +64,8 @@ const PERMS = {
   'users.manage':        ['owner'],
   'dashboard.team':      ['owner', 'sales_manager', 'admin', 'accounts'],
   'reports.finance':     ['owner', 'accounts'],
+  'game.view':           ['owner', 'sales_manager', 'sales_exec'],
+  'game.settings':       ['owner', 'sales_manager'],
 };
 const can = (user, perm) => !!PERMS[perm]?.includes(user.role);
 const requirePerm = (perm) => (req, res, next) =>

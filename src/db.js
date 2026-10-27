@@ -236,6 +236,16 @@ CREATE TABLE IF NOT EXISTS payouts (
   UNIQUE(teacher_id, month)
 );
 
+CREATE TABLE IF NOT EXISTS kudos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_user INTEGER NOT NULL REFERENCES users(id),
+  to_user INTEGER NOT NULL REFERENCES users(id),
+  kind TEXT NOT NULL,               -- conversion | renewal | demo | badge
+  ref_id INTEGER NOT NULL,          -- package id / activity id
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(from_user, kind, ref_id)
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT

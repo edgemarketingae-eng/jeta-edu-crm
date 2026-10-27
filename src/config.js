@@ -75,6 +75,26 @@ module.exports = {
   checkInDays: [7, 30],
   instalmentReminderDaysBefore: 3,
 
+  // Sales gamification. Outcomes are worth far more than activity, so the board rewards
+  // selling, not dialling for the sake of it.
+  game: {
+    points: {
+      call: 1,                 // any logged call
+      connected: 2,            // extra when the parent picked up
+      whatsappReply: 1,        // parent replied on WhatsApp
+      fastFirstCall: 5,        // first call inside the 15-minute SLA
+      demo: 10,                // moved a lead to Demo Scheduled
+      conversion: 50,          // new student
+      conversionPer100AED: 1,  // + 1 point per AED 100 of the sale
+      renewal: 30,
+      renewalPer200AED: 1,
+      kudosReceived: 2,
+    },
+    maxCallsPerLeadPerDay: 3,  // stops call-spamming one lead for points
+    defaults: { dailyCallTarget: 25, monthlyConversionGoal: 30, monthlyRevenueGoalAED: 60000 },
+    weekend: { UAE: [0, 6], India: [0] }, // Sun/Sat – streaks skip these days
+  },
+
   roles: {
     owner: 'Owner',
     sales_manager: 'Sales Manager',

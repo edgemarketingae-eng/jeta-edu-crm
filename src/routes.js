@@ -8,6 +8,7 @@ const students = require('./services/students');
 const finance = require('./services/finance');
 const reports = require('./services/reports');
 const automation = require('./automation');
+const game = require('./services/game');
 
 const r = express.Router();
 const P = auth.requirePerm;
@@ -361,6 +362,16 @@ r.get('/reports/team', P('dashboard.team'), wrap(() => q.all("SELECT id, name, m
     convertedMonth: q.get("SELECT COUNT(*) n FROM packages WHERE sold_by=? AND kind='New' AND created_at>=?", u.id, t.slice(0, 7)).n,
   };
 })));
+
+// ---------- Sales leaderboard & gamification ----------
+r.get('/game/leaderboard', P('game.view'), wrap((req) => game.leaderboard({ period: req.query.period, market: req.query.market || undefined })));
+r.get('/game/me', P('game.view'), wrap((req) => game.me(req.user)));
+r.get('/game/team-goal', P('game.view'), wrap(() => game.teamGoal()));
+r.get('/game/feed', P('game.view'), wrap((req) => game.feed(req.user, Math.min(Number(req.query.limit) || 30, 50))));
+r.post('/game/kudos', P('game.view'), wrap((req) => game.giveKudos(req.user, req.body)));
+r.get('/game/settings', P('game.view'), wrap(() => game.settings()));
+r.put('/game/settings', P('game.settings'), wrap((req) => game.saveSettings(req.body)));
+r.get('/game/rules', P('game.view'), wrap(() => ({ points: config.game.points, maxCallsPerLeadPerDay: config.game.maxCallsPerLeadPerDay, badges: game.BADGES.map(([id, name, desc]) => ({ id, name, desc })) })));
 
 // CSV exports
 r.get('/export/:what.csv', P('dashboard.team'), (req, res) => {

@@ -166,7 +166,7 @@
 
   // ---------------- layout ----------------
   const NAV = [
-    ['Sales', [['#/dashboard', 'Dashboard'], ['#/leads', 'Leads', 'overdue'], ['#/pipeline', 'Pipeline'], ['#/tasks', 'My tasks']]],
+    ['Sales', [['#/dashboard', 'Dashboard'], ['#/leads', 'Leads', 'overdue'], ['#/pipeline', 'Pipeline'], ['#/leaderboard', 'Leaderboard', null, 'game.view'], ['#/tasks', 'My tasks']]],
     ['Academics', [['#/students', 'Students'], ['#/classes', 'Classes & attendance', null, 'students.view'], ['#/teachers', 'Teachers', null, 'teachers.view']]],
     ['Finance', [['#/accounts', 'Accounts', null, 'payments.edit'], ['#/payouts', 'Teacher payouts', null, 'payouts.view']]],
     ['Admin', [['#/users', 'Users & roles', null, 'users.manage']]],
@@ -182,6 +182,7 @@
     classes: '<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
     accounts: '<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10.5h18M7 15h4"/>',
     payouts: '<circle cx="12" cy="12" r="8.5"/><path d="M14.8 9.2c-.5-.9-1.6-1.4-2.8-1.4-1.6 0-2.8.8-2.8 2.1 0 3 5.8 1.5 5.8 4.3 0 1.3-1.3 2.2-3 2.2-1.3 0-2.5-.6-3-1.6M12 6.2v1.6M12 16.4V18"/>',
+    trophy: '<path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 6H5a3 3 0 0 0 3 4M16 6h3a3 3 0 0 1-3 4M12 13v3.5M8.5 20h7M10 16.5h4l.5 3.5h-5z"/>',
     menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
     search: '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>',
     bell: '<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2H4.5z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/>',
@@ -196,7 +197,8 @@
   function bottomTabs() {
     const r = role();
     const sets = {
-      sales_exec: [['#/dashboard', 'Home', 'home'], ['#/leads?view=today', 'Today', 'leads', 'today'], ['#/pipeline', 'Pipeline', 'pipeline'], ['#/tasks', 'Tasks', 'tasks']],
+      sales_exec: [['#/dashboard', 'Home', 'home'], ['#/leads?view=today', 'Today', 'leads', 'today'], ['#/leaderboard', 'Board', 'trophy'], ['#/tasks', 'Tasks', 'tasks']],
+      sales_manager: [['#/dashboard', 'Home', 'home'], ['#/leads', 'Leads', 'leads', 'overdue'], ['#/leaderboard', 'Board', 'trophy'], ['#/tasks', 'Tasks', 'tasks']],
       admin: [['#/dashboard', 'Home', 'home'], ['#/students', 'Students', 'students'], ['#/classes', 'Classes', 'classes'], ['#/tasks', 'Tasks', 'tasks']],
       accounts: [['#/dashboard', 'Home', 'home'], ['#/accounts', 'Accounts', 'accounts'], ['#/payouts', 'Payouts', 'payouts'], ['#/tasks', 'Tasks', 'tasks']],
     };
@@ -317,7 +319,7 @@
     [/^#\/dashboard$/, pageDashboard], [/^#\/leads$/, pageLeads], [/^#\/leads\/(\d+)$/, pageLead], [/^#\/pipeline$/, pagePipeline],
     [/^#\/students$/, pageStudents], [/^#\/students\/(\d+)$/, pageStudent], [/^#\/classes$/, pageClasses],
     [/^#\/teachers$/, pageTeachers], [/^#\/accounts$/, pageAccounts], [/^#\/payouts$/, pagePayouts],
-    [/^#\/tasks$/, pageTasks], [/^#\/users$/, pageUsers],
+    [/^#\/tasks$/, pageTasks], [/^#\/users$/, pageUsers], [/^#\/leaderboard$/, pageLeaderboard],
   ];
   const qs = () => Object.fromEntries(new URLSearchParams(location.hash.split('?')[1] || ''));
   async function route() {
@@ -350,7 +352,8 @@
     const x = await get(`/dashboard?${query}`);
     const team = can('dashboard.team') ? await get('/reports/team') : [];
     const periods = [['today', 'Today'], ['week', 'This week'], ['month', 'This month'], ['custom', 'Custom']];
-    setPage(`<div class="page-head"><div><h1>Dashboard</h1><div class="muted">${d(x.range.from)} – ${d(new Date(new Date(x.range.to) - 1).toISOString())}${role() === 'sales_exec' ? ' · your numbers' : ''}</div></div></div>
+    const gameCard = can('game.view') ? await dashGameCard() : '';
+    setPage(`${gameCard}<div class="page-head"><div><h1>Dashboard</h1><div class="muted">${d(x.range.from)} – ${d(new Date(new Date(x.range.to) - 1).toISOString())}${role() === 'sales_exec' ? ' · your numbers' : ''}</div></div></div>
       <form class="filters" id="dash-f">
         ${select('period', periods, p.period || 'month')}
         <input type="date" name="from" value="${esc(p.from || '')}" ${p.period === 'custom' ? '' : 'hidden'}><input type="date" name="to" value="${esc(p.to || '')}" ${p.period === 'custom' ? '' : 'hidden'}>
@@ -588,7 +591,11 @@
         };
         oc.onchange();
       },
-      onSubmit: async (f) => { const r = await post(`/leads/${l.id}/call`, f); toast(`Call logged · ${r.stage}`); reload(); },
+      onSubmit: async (f) => {
+        const r = await post(`/leads/${l.id}/call`, f);
+        const pts = can('game.view') ? 1 + (String(f.outcome).startsWith('Connected') ? 2 : 0) : 0;
+        toast(`Call logged · ${r.stage}${pts ? ` · +${pts} pts` : ''}`); reload();
+      },
     });
   }
 
@@ -658,6 +665,7 @@
         }
         const r = await post(`/leads/${l.id}/convert`, body);
         toast('Converted – student created and Admin notified');
+        if (can('game.view')) celebrate(body.price, l.currency);
         location.hash = `#/students/${r.student_id}`;
       },
     });
@@ -691,6 +699,138 @@
     const ok = $('#kyc-ok'); if (ok) ok.onclick = async () => { await post(`/leads/${l.id}/kyc/verify`, { approve: true }); toast('KYC verified'); reload(); };
     const no = $('#kyc-no'); if (no) no.onclick = () => modal({ title: 'Reject KYC', body: field('Reason', input('reason', '', 'text', 'required')),
       onSubmit: async (f) => { await post(`/leads/${l.id}/kyc/verify`, { approve: false, reason: f.reason }); toast('KYC rejected'); reload(); } });
+  }
+
+  // ---------------- leaderboard (sales gamification) ----------------
+  const initials = (n) => String(n || '?').replace(/[–-].*$/, '').trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+  const shortName = (n) => String(n || '').replace(/\s*[–-].*$/, '');
+  const avatar = (n, cls = '') => `<span class="avatar ${cls}" aria-hidden="true">${esc(initials(n))}</span>`;
+  const move = (m, hadPrev = true) => (!hadPrev ? '<span class="mv new">new</span>' : m > 0 ? `<span class="mv up" title="Up ${m}">▲ ${m}</span>` : m < 0 ? `<span class="mv down" title="Down ${-m}">▼ ${-m}</span>` : '<span class="mv same">–</span>');
+  const progress = (val, goal, label, pace) => {
+    const pct = goal ? Math.min(100, Math.round((val / goal) * 100)) : 0;
+    return `<div class="goal"><div class="goal-top"><span>${label}</span><b class="num">${pct}%</b></div>
+      <div class="goal-track">${pace !== undefined ? `<i class="pace" style="left:${pace}%" title="Where we should be today"></i>` : ''}<span style="width:${pct}%"></span></div></div>`;
+  };
+  let BADGE_INFO = null;
+
+  function standingLine(m, rows) {
+    if (!m.onBoard) return '';
+    if (m.rank === 1) {
+      const second = rows.find((r) => r.rank === 2);
+      return second ? `You're leading by <b>${m.points - second.points} pts</b> over ${esc(shortName(second.name))}. Keep it.` : "You're leading.";
+    }
+    return m.next ? `<b>${m.next.gap} pts</b> to pass ${esc(shortName(m.next.name))} for #${m.next.rank}` : '';
+  }
+
+  async function dashGameCard() {
+    try {
+      const [m, b] = await Promise.all([get('/game/me'), get('/game/leaderboard?period=month')]);
+      const top = b.rows.slice(0, 5);
+      return `<a class="game-card" href="#/leaderboard">
+        <div class="gc-me">${m.onBoard ? `<div class="gc-rank num">#${m.rank}<small>of ${m.of}</small></div>
+          <div><div class="gc-line">${standingLine(m, b.rows)}</div>
+          <div class="small gc-sub">${m.points} pts this month${m.streak ? ` · ${m.streak}-day streak` : ''} · ${m.callsToday}/${m.dailyCallTarget} calls today</div></div>`
+    : '<div><div class="gc-line"><b>Sales leaderboard</b></div><div class="small gc-sub">See who is leading this month</div></div>'}</div>
+        <ol class="gc-top">${top.map((r) => `<li class="${r.user_id === S.me.id ? 'me' : ''}"><span class="num">${r.rank}</span>${avatar(r.name, 'sm')}<span class="nm">${esc(shortName(r.name))}</span><b class="num">${r.points}</b></li>`).join('')}</ol>
+      </a>`;
+    } catch { return ''; }
+  }
+
+  async function pageLeaderboard() {
+    const p = qs();
+    const period = p.period || 'month';
+    const market = p.market || '';
+    const [b, m, goal, feed, rules] = await Promise.all([
+      get(`/game/leaderboard?period=${period}${market ? `&market=${market}` : ''}`), get('/game/me'), get('/game/team-goal'), get('/game/feed?limit=12'),
+      BADGE_INFO ? Promise.resolve(BADGE_INFO) : get('/game/rules'),
+    ]);
+    BADGE_INFO = rules;
+    const badgeName = Object.fromEntries(rules.badges.map((x) => [x.id, x.name]));
+    const rows = b.rows;
+    const podium = [rows[1], rows[0], rows[2]].filter(Boolean);
+    const periodLabel = { today: 'today', week: 'this week', month: 'this month' }[period];
+    const qsFor = (o) => `#/leaderboard?${new URLSearchParams({ period, ...(market && { market }), ...o })}`;
+
+    setPage(`<div class="page-head"><div><h1>Leaderboard</h1><div class="muted">Points from logged calls, demos, conversions and renewals</div></div>
+      <div class="actions"><button id="how">How points work</button>${can('game.settings') ? '<button id="targets">Set targets</button>' : ''}</div></div>
+
+      ${m.onBoard ? `<section class="panel standing" aria-label="Your standing">
+        <div class="st-rank"><span class="num">#${m.rank}</span><small>of ${m.of} this month ${move(m.movement)}</small></div>
+        <div class="st-main"><div class="st-line">${standingLine(m, (period === 'month' && !market) ? rows : (await get('/game/leaderboard?period=month')).rows)}</div>
+          <div class="st-stats"><span><b class="num">${m.points}</b> pts</span><span>${m.streak ? `<b class="num">${m.streak}</b>-day streak` : 'No streak yet'}</span><span>Best month <b class="num">${m.personalBest}</b></span>${m.weekRank ? `<span>#<b class="num">${m.weekRank}</b> this week</span>` : ''}</div>
+          ${progress(m.callsToday, m.dailyCallTarget, `Today's calls <span class="num">${m.callsToday} / ${m.dailyCallTarget}</span>${m.callsToday >= m.dailyCallTarget ? ' – target hit' : ` – ${m.dailyCallTarget - m.callsToday} to keep the streak`}`)}
+          ${m.personalBest ? progress(m.points, m.personalBest, `Personal best <span class="num">${m.points} / ${m.personalBest}</span>${m.points > m.personalBest ? ' – new record' : ''}`) : ''}
+        </div></section>` : ''}
+
+      <section class="panel team-goal" aria-label="Team goal">
+        <div class="panel-head"><h2>Team goal · ${esc(new Date(goal.month + '-01').toLocaleDateString('en-GB', { month: 'long' }))}</h2><span class="small muted desk-note">The marker shows where we should be today</span></div>
+        <div class="tg-grid">${progress(goal.conversions, goal.conversionGoal, `New students <span class="num">${goal.conversions} / ${goal.conversionGoal}</span>`, goal.monthPct)}
+        ${progress(goal.revenueAED, goal.revenueGoalAED, `Revenue <span class="num">AED ${goal.revenueAED.toLocaleString()} / ${goal.revenueGoalAED.toLocaleString()}</span>`, goal.monthPct)}</div>
+      </section>
+
+      <nav class="views">${[['today', 'Today'], ['week', 'This week'], ['month', 'This month']].map(([v, l]) => `<a href="${qsFor({ period: v })}" class="${v === period ? 'on' : ''}">${l}</a>`).join('')}
+        <span style="flex:1"></span>${[['', 'All'], ['UAE', 'UAE'], ['India', 'India']].map(([v, l]) => `<a href="#/leaderboard?${new URLSearchParams({ period, ...(v && { market: v }) })}" class="${v === market ? 'on' : ''}">${l}</a>`).join('')}</nav>
+
+      ${rows.length ? `<div class="podium" aria-label="Top three">${podium.map((r) => `<div class="pod pod-${r.rank} ${r.user_id === S.me.id ? 'me' : ''}">
+          ${avatar(r.name, 'lg')}<div class="pod-name">${esc(shortName(r.name))}</div><div class="pod-pts num">${r.points} pts</div>
+          <div class="pod-step"><span class="num">${r.rank}</span></div></div>`).join('')}</div>` : ''}
+      ${b.mostImproved ? `<div class="callout green">Most improved ${periodLabel}: <b>${esc(shortName(b.mostImproved.name))}</b>, up ${b.mostImproved.gain} pts on the previous period.</div>` : ''}
+
+      <div class="table-wrap"><table class="board-table"><thead><tr><th>Rep</th><th class="r">Points</th><th>Move</th><th class="r">Students</th><th class="r">Revenue (AED)</th><th class="r">Calls</th><th class="r">Connect</th><th class="r">Streak</th><th>Badges</th></tr></thead><tbody>
+        ${rows.map((r) => `<tr class="${r.user_id === S.me.id ? 'me' : ''}"><td><span class="rk num">${r.rank}</span>${avatar(r.name, 'sm')}<b>${esc(shortName(r.name))}</b>${r.user_id === S.me.id ? ' <span class="pill green">You</span>' : ''}<div class="small muted">${esc(r.market || 'Manager')}</div></td>
+          <td class="r num"><b>${r.points}</b></td><td>${move(r.movement, r.prevRank !== null)}</td><td class="r num">${r.conversions + r.renewals}</td><td class="r num">${r.revenueAED.toLocaleString()}</td>
+          <td class="r num">${r.calls}</td><td class="r num">${r.connectRate === null ? '—' : `${r.connectRate}%`}</td><td class="r num">${r.streak ? `${r.streak}d` : '—'}</td>
+          <td>${r.badges.map((x) => `<span class="badge-chip">${esc(badgeName[x] || x)}</span>`).join(' ') || '<span class="muted">—</span>'}</td></tr>`).join('')}
+      </tbody></table></div>
+
+      <div class="lb-grid">
+        <section class="panel"><div class="panel-head"><h2>Team wins</h2><span class="small muted">Last 14 days</span></div>
+          ${feed.length ? `<ul class="wins">${feed.map((w) => `<li>${avatar(w.name, 'sm')}<div class="w-body"><div><b>${esc(shortName(w.name))}</b> ${w.kind === 'conversion' ? `enrolled <b>${esc(w.child_name || 'a student')}</b> · ${w.hours} hrs` : w.kind === 'renewal' ? `renewed <b>${esc(w.child_name)}</b> · ${w.hours} hrs` : `booked a demo for <b>${esc(w.child_name || w.parent_name)}</b>`}</div>
+            <div class="small muted">${ago(w.at)} · +${w.points} pts</div></div>
+            ${w.mine ? `<span class="kudos-count small muted">${w.kudos ? `${w.kudos} kudos` : ''}</span>` : `<button class="small kudos ${w.gave ? 'given' : ''}" data-k="${w.kind}" data-ref="${w.ref_id}" ${w.gave ? 'disabled' : ''}>${w.gave ? 'Kudos sent' : 'Give kudos'}${w.kudos ? ` · ${w.kudos}` : ''}</button>`}</li>`).join('')}</ul>`
+    : '<div class="empty">No wins yet in the last two weeks. The first conversion shows up here.</div>'}</section>
+        ${m.onBoard ? `<section class="panel"><div class="panel-head"><h2>Your badges</h2><span class="small muted">${m.badges.filter((x) => x.earned).length} of ${m.badges.length}</span></div>
+          <ul class="badges">${m.badges.map((x) => `<li class="${x.earned ? 'earned' : ''}"><div class="bd-name">${esc(x.name)}</div><div class="small muted">${esc(x.desc)}</div>
+            ${x.earned ? '<div class="small bd-done">Earned</div>' : `<div class="bd-track"><span style="width:${Math.round((x.progress / x.need) * 100)}%"></span></div><div class="small muted num">${x.progress} / ${x.need}</div>`}</li>`).join('')}</ul></section>` : ''}
+      </div>`);
+
+    $$('.kudos[data-k]').forEach((btn) => { btn.onclick = async () => {
+      try { await post('/game/kudos', { kind: btn.dataset.k, ref_id: Number(btn.dataset.ref) }); btn.textContent = 'Kudos sent'; btn.disabled = true; btn.classList.add('given'); toast('Kudos sent – they get +2 pts'); } catch (e) { toast(e.message, true); }
+    }; });
+    $('#how').onclick = () => {
+      const pt = rules.points;
+      modal({ title: 'How points work', body: `<dl class="fields">
+        <dt>Call logged</dt><dd>${pt.call} pt (max ${rules.maxCallsPerLeadPerDay} per lead per day)</dd><dt>Parent picked up</dt><dd>+${pt.connected} pts</dd>
+        <dt>WhatsApp reply</dt><dd>${pt.whatsappReply} pt</dd><dt>First call within 15 min</dt><dd>${pt.fastFirstCall} pts</dd>
+        <dt>Demo booked</dt><dd>${pt.demo} pts</dd><dt>New student</dt><dd>${pt.conversion} pts + 1 per AED 100 of the sale</dd>
+        <dt>Renewal</dt><dd>${pt.renewal} pts + 1 per AED 200</dd><dt>Kudos received</dt><dd>${pt.kudosReceived} pts</dd></dl>
+        <p class="small muted" style="margin-top:14px">INR sales count at the AED rate, so UAE and India compete fairly. Streaks count working days where you hit the daily call target; weekends don't break them.</p>
+        <h3 style="margin-top:16px">Badges</h3><dl class="fields">${rules.badges.map((x) => `<dt>${esc(x.name)}</dt><dd>${esc(x.desc)}</dd>`).join('')}</dl>` });
+    };
+    const t = $('#targets'); if (t) t.onclick = async () => {
+      const cur = await get('/game/settings');
+      modal({ title: 'Team targets', submit: 'Save targets',
+        body: `${field('Daily call target per rep (streaks)', input('dailyCallTarget', cur.dailyCallTarget, 'number', 'min="1"'))}
+          ${field('Monthly new-student goal (team)', input('monthlyConversionGoal', cur.monthlyConversionGoal, 'number', 'min="1"'))}
+          ${field('Monthly revenue goal, AED (team)', input('monthlyRevenueGoalAED', cur.monthlyRevenueGoalAED, 'number', 'min="1"'))}`,
+        onSubmit: async (f) => { await api('PUT', '/game/settings', f); toast('Targets saved'); reload(); } });
+    };
+  }
+
+  // One celebratory moment when a rep converts a lead.
+  async function celebrate(price, currency) {
+    try {
+      const m = await get('/game/me');
+      const aed = currency === 'INR' ? price / S.meta.exchangeRate.INR_PER_AED : price;
+      const pts = BADGE_INFO?.points ? BADGE_INFO.points.conversion + Math.floor(aed / 100) : 50 + Math.floor(aed / 100);
+      const root = document.createElement('div');
+      root.className = 'celebrate';
+      root.innerHTML = `<div class="cel-card" role="status"><div class="cel-pts num">+${pts}</div><div class="cel-title">New student enrolled</div>
+        <div class="small">You're <b>#${m.rank}</b> this month with ${m.points} pts${m.next ? ` · ${m.next.gap} to pass ${esc(shortName(m.next.name))}` : ''}</div></div>`;
+      document.body.appendChild(root);
+      setTimeout(() => root.remove(), 3600);
+      root.onclick = () => root.remove();
+    } catch { /* not on the board */ }
   }
 
   // ---------------- tasks ----------------

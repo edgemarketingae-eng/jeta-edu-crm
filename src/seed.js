@@ -114,7 +114,42 @@ function seed() {
   // A 2nd-reassignment candidate (old lead for the 30-day rule demo)
   const old = created.find((l) => q.get('SELECT stage FROM leads WHERE id=?', l.id).stage === 'Qualified');
   if (old) update('leads', old.id, { assigned_at: addDays(now(), -26) });
+  seedGameHistory();
   q.run('DELETE FROM notifications'); // start clean; automation regenerates live alerts
+}
+
+// A few weeks of call history per rep so the leaderboard has streaks, movement and personal bests.
+function seedGameHistory() {
+  const reps = q.all("SELECT * FROM users WHERE role='sales_exec'");
+  const style = { 'aisha@jeta.edu': [26, 32], 'rahul@jeta.edu': [14, 34], 'priya@jeta.edu': [24, 30], 'arjun@jeta.edu': [10, 28] };
+  const outcomes = ['Connected - Interested', 'Not answered', 'Connected - Call back later', 'Busy / Switched off', 'Not answered', 'Connected - Interested'];
+  let seedN = 7;
+  const rnd = () => { seedN = (seedN * 9301 + 49297) % 233280; return seedN / 233280; };
+  for (const rep of reps) {
+    const leadIds = q.all('SELECT id FROM leads WHERE owner_id=?', rep.id).map((l) => l.id);
+    if (!leadIds.length) continue;
+    const [lo, hi] = style[rep.email] || [12, 28];
+    const off = rep.market === 'India' ? [0] : [0, 6];
+    for (let d = 45; d >= 1; d--) {
+      const day = addDays(now(), -d);
+      if (off.includes(new Date(day).getUTCDay())) continue;
+      const calls = Math.round(lo + rnd() * (hi - lo));
+      for (let c = 0; c < calls; c++) {
+        const at = addMinutes(`${day.slice(0, 10)}T05:00:00.000Z`, Math.floor(rnd() * 600));
+        const outcome = outcomes[Math.floor(rnd() * outcomes.length)];
+        insert('activities', { entity: 'lead', entity_id: leadIds[Math.floor(rnd() * leadIds.length)], type: 'call', outcome,
+          body: '', meta: JSON.stringify({ duration_min: outcome.startsWith('Connected') ? 2 + Math.floor(rnd() * 8) : 0 }), user_id: rep.id, created_at: at });
+      }
+      if (rnd() < 0.5) insert('activities', { entity: 'lead', entity_id: leadIds[0], type: 'whatsapp', outcome: 'Replied', body: 'Parent replied', user_id: rep.id, created_at: addMinutes(day, 60) });
+      if (rnd() < 0.18) insert('activities', { entity: 'lead', entity_id: leadIds[Math.floor(rnd() * leadIds.length)], type: 'stage', body: 'Qualified → Demo Scheduled', user_id: rep.id, created_at: addMinutes(day, 120) });
+    }
+  }
+  // A little peer recognition to start the feed
+  const wins = q.all("SELECT id, sold_by FROM packages WHERE kind='New'");
+  const mgr = q.get("SELECT id FROM users WHERE role='sales_manager'");
+  for (const w of wins) for (const r of [mgr, ...reps].filter((u) => u && u.id !== w.sold_by).slice(0, 2)) {
+    q.run('INSERT OR IGNORE INTO kudos(from_user,to_user,kind,ref_id,created_at) VALUES(?,?,?,?,?)', r.id, w.sold_by, 'conversion', w.id, now());
+  }
 }
 
 if (require.main === module) {

@@ -126,3 +126,43 @@ test('refunds need manager approval before accounts can process', () => {
   F.refund(pay.id, 'approve', {}, owner);
   assert.equal(F.refund(pay.id, 'process', {}, accounts).status, 'Refunded');
 });
+
+// ---------- gamification ----------
+const game = require('../src/services/game');
+
+test('leaderboard: conversions outweigh calls, call spam on one lead is capped', () => {
+  const { insert } = require('../src/db');
+  const mk = (n) => q.get('SELECT * FROM users WHERE id=?', insert('users', { name: n, email: `${n}@t.test`, password_hash: 'x', role: 'sales_exec', market: 'UAE' }));
+  const [a, b] = [mk('fresh-a'), mk('fresh-b')];
+  const start = new Date(Date.now() - 1000).toISOString();
+  const end = new Date(Date.now() + 3600000).toISOString();
+  const l = lead();
+  for (let i = 0; i < 10; i++) L.logCall(l.id, { outcome: 'Not answered' }, a); // only 3 should count
+  const before = game.score(start, end).find((r) => r.user_id === a.id);
+  assert.equal(before.breakdown.calls, 3);
+  assert.equal(before.calls, 10);
+  const sid = convertedStudent();
+  q.run('UPDATE packages SET sold_by=? WHERE student_id=?', b.id, sid);
+  const rowB = game.score(start, end).find((r) => r.user_id === b.id);
+  assert.ok(rowB.breakdown.conversions >= 50);
+  assert.ok(rowB.points > before.points);
+});
+
+test('kudos: not to yourself, once per win, worth points to the receiver', () => {
+  const pkg = q.get("SELECT * FROM packages WHERE kind='New' LIMIT 1");
+  const seller = q.get('SELECT * FROM users WHERE id=?', pkg.sold_by);
+  const other = q.get('SELECT * FROM users WHERE id=?', require('../src/db').insert('users', { name: 'giver', email: 'giver@t.test', password_hash: 'x', role: 'sales_exec', market: 'India' }));
+  throwsMsg(() => game.giveKudos(seller, { kind: 'conversion', ref_id: pkg.id }), /yourself/);
+  game.giveKudos(other, { kind: 'conversion', ref_id: pkg.id });
+  throwsMsg(() => game.giveKudos(other, { kind: 'conversion', ref_id: pkg.id }), /already/);
+});
+
+test('me(): rank, gap to the next rep and badges are reported', () => {
+  const rep = q.get("SELECT * FROM users WHERE role='sales_exec' LIMIT 1");
+  const m = game.me(rep);
+  assert.ok(m.onBoard && m.rank >= 1);
+  if (m.rank > 1) assert.ok(m.next.gap > 0);
+  assert.equal(m.badges.length, game.BADGES.length);
+  const saved = game.saveSettings({ dailyCallTarget: 10 });
+  assert.equal(saved.dailyCallTarget, 10);
+});

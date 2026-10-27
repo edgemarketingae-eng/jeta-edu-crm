@@ -67,6 +67,15 @@ All tunable numbers (SLAs, cadence, 25/30-day rule, attendance policy, hours ale
 | 14. Dashboards | `src/services/reports.js`, filterable by period, rep, market and source |
 | 15. Automation | `src/automation.js` runs every minute; on the 1st it drafts last month's payouts |
 
+## Sales leaderboard
+
+Every sales portal has a **Leaderboard** (Board tab on phones) and a standing card on the dashboard. It is scored automatically from logged work, so there's nothing extra to enter.
+
+- **Points:** call 1, parent picked up +2, WhatsApp reply 1, first call within 15 min 5, demo booked 10, new student 50 + 1 per AED 100, renewal 30 + 1 per AED 200, kudos received 2. Only 3 calls per lead per day count, so selling beats dialling. INR converts at the AED rate so both markets compete fairly.
+- **Motivation:** "X pts to pass the next person", a daily call streak (weekends don't break it), personal-best month, rank movement, and "most improved".
+- **Team:** shared monthly goal with a pace marker, a wins feed with peer kudos, and badges with visible progress.
+- Managers set the daily call target and the team goals under **Set targets**. Point values live in `src/config.js` → `game`.
+
 Anti-poaching: teacher records and payout statements never carry parent contact details.
 
 ## Lead capture webhook
