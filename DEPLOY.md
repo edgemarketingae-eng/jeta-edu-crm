@@ -35,6 +35,13 @@ src/auth.js            login, sessions, role permission matrix
 src/services/          leads, students, finance, reports, game (leaderboard)
 src/automation.js      scheduled rules (every minute)
 src/notify.js          in-app / WhatsApp / email notification adapters
+src/secure.js          AES-256-GCM field encryption + TOTP two-factor codes
+src/context.js         per-request user context (feeds the audit log)
+src/integrations/google.js  Google Calendar (Jeta-owned Meet links) + Meet attendance (Reports API)
+src/services/          leads, students, finance, reports, game, history (audit/versions),
+                       phone (tracker), attendance (Meet/teacher form), accountability, settings
+public/teacher.html    teacher post-class page (token link, no login, no parent contacts)
+android/               Jeta Call Tracker – Android app source (build in Android Studio)
 public/                web app (index.html, app.js, styles.css, icons, manifest)
 scripts/backup.js      online database backup
 scripts/create-owner.js  create or reset an Owner login
@@ -61,6 +68,10 @@ Copy `.env.example` to `.env` and fill it in:
 | `TRUST_PROXY` | yes behind Nginx | `true` so real client IPs are used for the login guard |
 | `WEBHOOK_KEY` | optional | Enables the lead-capture webhook. Generate with `openssl rand -hex 24`. |
 | `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_ID`, `SMTP_URL` | optional | See section 8 |
+| `ENCRYPTION_KEY` | **yes (production)** | 64 hex characters (`openssl rand -hex 32`). Encrypts bank details, KYC document refs and ID numbers, and 2FA secrets. **Back it up**; without it that data can't be read. The app refuses to start in production without it. |
+| `PUBLIC_URL` | yes | e.g. `https://crm.jetaedu.com`. Used in the class-confirmation links sent to teachers. |
+| `TELEPHONY_KEY` | optional | Enables the cloud-telephony webhook (section 8) |
+| `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_IMPERSONATE`, `GOOGLE_ADMIN_IMPERSONATE`, `GOOGLE_CALENDAR_ID` | optional | Jeta-owned Meet links and automatic Meet attendance (section 8) |
 | `INR_PER_AED` | no | Rate for combined AED/INR reports (default 22.7) |
 | `BRAND_NAME` | no | Name on invoices and payout statements |
 
@@ -187,6 +198,11 @@ The schema migrates itself on start (`CREATE TABLE IF NOT EXISTS`). When a futur
 ## 7. Go-live checklist
 
 - [ ] `SEED_DEMO=false`, and the login page shows **no** demo hint.
+- [ ] `ENCRYPTION_KEY` set **and backed up** outside the server, for example in a password manager.
+- [ ] Owner, Admin and Accounts have turned on two-step sign-in. It is required automatically on production, and each of them is asked to set it up at first sign-in. A lost phone is fixed with Users & roles → Reset 2FA.
+- [ ] **Settings → Company & invoices** filled in: legal name, address, TRN, logo, and VAT on or off.
+- [ ] **Settings → Scorecard targets** agreed with staff in writing.
+- [ ] Teachers have their Google email on their profile, which is needed to match Meet attendance.
 - [ ] Owner account created from `.env`. You can remove `OWNER_PASSWORD` from `.env` afterwards.
 - [ ] HTTPS works, and port 3000 is not reachable from outside (`curl http://SERVER_IP:3000` should fail).
 - [ ] Nightly backup runs, and one restore has been tested.
@@ -240,15 +256,62 @@ Messages already wired in:
 
 ---
 
-## 9. Security notes
+### Google Workspace: Jeta-owned Meet links and attendance (blueprint 11.4)
+1. In Google Cloud, create a project and enable the **Google Calendar API** and the **Admin SDK API**.
+2. Create a **service account**, download its JSON key and enable **domain-wide delegation** for it.
+3. In the Workspace Admin console, go to **Security → API controls → Domain-wide delegation** and add the service account's client ID with these scopes:
+   `https://www.googleapis.com/auth/calendar.events,https://www.googleapis.com/auth/admin.reports.audit.readonly`
+4. Set `GOOGLE_SERVICE_ACCOUNT_JSON` (a path or the JSON itself) and `GOOGLE_IMPERSONATE`, the Jeta account that owns the class calendar. Set `GOOGLE_ADMIN_IMPERSONATE` to a Workspace admin for the Reports API.
+5. Restart the app. Settings → Integrations should show Google as connected.
+
+What happens after setup:
+- Scheduling a student creates **one recurring Calendar event with a Meet link** under the Jeta account and invites the teacher and parent. Guests can't see each other, which protects parent contacts.
+- About 30 minutes after each class, the CRM pulls Meet participation from the Reports API and applies the rules: a class is Completed when the teacher and at least one student each attended 80% or more of the slot. If the teacher was absent, the class isn't paid and is flagged for a reschedule.
+- Meet attendance data depends on your Workspace edition, so confirm access first. `src/integrations/google.js` follows Google's REST documentation but **has not been run against a live Workspace**, so test it on one class before relying on it.
+
+**Without Google set up**, Admin pastes a Meet link that the Jeta account created on the student's schedule. Attendance then comes from:
+- the **teacher's post-class form**, which teachers open from the link the CRM sends on WhatsApp;
+- **Classes → Import Meet attendance**, which takes a CSV;
+- a 10% random audit;
+- the **Needs review** list.
+
+### Phone tracker (blueprint 6)
+- **Android app:** build `android/` in Android Studio (see `android/README.md`), sign it and install it privately or through an MDM. Reps pair a phone under **Phone tracker → Create pairing code**.
+  - The app sends only calls with CRM numbers. Matching happens on the phone using hashes.
+  - Connected calls arrive as entries that need notes within 10 minutes. Unanswered calls trigger the normal retry cadence, and missed incoming calls create call-back tasks.
+  - **The app source hasn't been compiled here.** Build it and test it on one phone first.
+- **Cloud telephony (needed for iPhones):** point the provider's call webhook at `POST /api/webhooks/telephony?key=TELEPHONY_KEY`. The body format is in `android/README.md`. Calls are matched to the rep by their email.
+- Get written staff consent and check the UAE and India data-protection rules before launch (blueprint 6.4).
+
+## 9. Blueprint decisions – defaults chosen
+
+These are the decisions from section 21 of the blueprint. Each one is a setting, so you can change it later.
+
+| Decision | Default in the CRM | Where to change |
+|---|---|---|
+| Android tracker or cloud telephony | Both supported | Phone tracker page, `TELEPHONY_KEY` |
+| Google Workspace Meet reports | Used when configured. Otherwise the teacher form, Meet CSV import and audits | Env vars above |
+| No-show / teacher-absence policy | Student no-show without notice: hours deducted, teacher paid. With notice, or teacher absent: no deduction, no pay, reschedule | `src/config.js` → `attendancePolicy` |
+| Scorecard targets and consequences | Notes 90%, on-time follow-ups 85%, first-call SLA 90%. Coaching after 2 weeks below target | Settings → Scorecard targets |
+| Payout cycle and rates | Monthly. Rates per teacher, with optional rules by subject, grade or batch | Settings → Teacher payouts; Teachers → Edit |
+| Invoice company details and VAT | VAT off. Prices are VAT-inclusive when it's on. Numbering JETA-YYYY-0001 | Settings → Company & invoices |
+| Zoho vs custom | Custom CRM (this codebase) | – |
+| +48h escalation | Flag red and the manager takes over (or auto-reassign) | Settings → Escalation |
+| Lead assignment | Round-robin by market (or least open leads) | Settings → Lead assignment |
+
+## 10. Security notes
 
 - Passwords are hashed with scrypt. Sessions are random 256-bit bearer tokens that last 14 days.
+- Two-step sign-in (TOTP, works with Google or Microsoft Authenticator) is required for Owner, Admin and Accounts on production.
+- Bank details, KYC ID numbers and document links, and 2FA secrets are encrypted at rest with AES-256-GCM (`ENCRYPTION_KEY`). Existing plain values are encrypted on the next start.
+- **Audit log:** every create, edit, stage change, reassignment, merge, archive, payment, payout, export and sign-in records who, what, when, and the old and new values. Managers and the Owner can read it under Weekly review → Audit log. Nothing is hard-deleted: leads are archived with a reason, and note edits keep every version.
+- CSV exports are limited to the Owner and the Sales Manager, and every export is logged.
 - Every API route checks the role permission matrix in `src/auth.js`, the server-side version of the blueprint's roles table.
 - Sign-in is locked for 15 minutes after 10 failed attempts per IP and email.
 - Security headers are set: `nosniff`, `SAMEORIGIN`, a referrer policy and a permissions policy. Add HSTS in Nginx once HTTPS is active.
 - Anti-poaching: teacher records and payout statements never include parent contact details.
 - KYC fields hold document *links*. Store the actual ID scans in access-controlled storage, such as a private Google Drive or S3 bucket, and paste the link.
 
-## 10. Scaling later
+## 11. Scaling later
 
 SQLite with a single instance comfortably handles this workload. If you later need several app servers, move to PostgreSQL. The SQL is standard and lives in `src/db.js` and `src/services/`. At that point, move the scheduler in `src/automation.js` into its own worker so it runs only once.

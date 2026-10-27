@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const { open, setDb, q, update } = require('../src/db');
 
 setDb(open(':memory:'));
-require('../src/seed').seed();
+require('../src/context').run({ noAudit: true }, () => require('../src/seed').seed());
 
 const L = require('../src/services/leads');
 const S = require('../src/services/students');
@@ -39,14 +39,14 @@ test('not-connected cadence: retries, WhatsApp task, Nurture after 6 failed atte
   let r = L.logCall(l.id, { outcome: 'Not answered' }, owner);
   assert.equal(r.stage, 'Attempted');
   assert.ok(q.get("SELECT 1 FROM tasks WHERE entity='lead' AND entity_id=? AND type='whatsapp'", l.id));
-  for (let i = 0; i < 5; i++) r = L.logCall(l.id, { outcome: 'Busy / Switched off' }, owner);
+  for (let i = 0; i < 5; i++) r = L.logCall(l.id, { outcome: 'Busy' }, owner);
   assert.equal(r.stage, 'Nurture');
   assert.equal(r.attempt_count, 6);
 });
 
 test('30-day rule warns on day 25, reassigns on day 30, Nurture after 2 reassignments', () => {
   const l = lead();
-  L.logCall(l.id, { outcome: 'Connected - Interested', follow_up_at: addDays(now(), 1) }, owner);
+  L.logCall(l.id, { outcome: 'Connected - Interested', notes: 'Spoke to parent.\nWants a demo.', follow_up_at: addDays(now(), 1) }, owner);
   update('leads', l.id, { assigned_at: addDays(now(), -26) });
   L.runLeadRules();
   assert.equal(L.getLead(l.id).expiry_warned, 1);

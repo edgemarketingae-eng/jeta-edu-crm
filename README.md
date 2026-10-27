@@ -69,6 +69,31 @@ All tunable numbers (SLAs, cadence, 25/30-day rule, attendance policy, hours ale
 | 14. Dashboards | `src/services/reports.js`, filterable by period, rep, market and source |
 | 15. Automation | `src/automation.js` runs every minute; on the 1st it drafts last month's payouts |
 
+## Accountability, tracking and security (Complete CRM Blueprint)
+
+- **Ownership:** every lead and student row shows its owner and last action. Rows turn red when nothing has happened past the SLA.
+- **Escalation ladder:**
+  - reminder when due;
+  - +1 hour to the owner;
+  - +24 hours to the manager, and the item turns red;
+  - +48 hours escalated, with the manager taking over or the lead reassigned. This counts on the owner's scorecard.
+- **Scorecards** for every role (sales, admin, accounts, manager) with targets, an **8 pm daily summary** to each rep and the manager, **coaching** after two weeks below target, and a **Weekly review** page with action items.
+- **Conversation log:**
+  - Each entry records its type, direction, outcome, objection tags, sentiment and next step.
+  - Connected calls need a note of at least 2 lines.
+  - Authors can edit their own entries for 24 hours; after that, edits need manager approval.
+  - Every version is kept, and nothing is deleted.
+- **Duplicates:** the phone number is the unique key. Bulk CSV import skips duplicates and reports them, and managers can merge leads.
+- **Phone tracker:** an Android app (source in `android/`) or a cloud-telephony webhook. Dials and talk time are measured, and connected calls ask for notes within 10 minutes.
+- **Meet attendance:**
+  - Jeta-owned Meet links.
+  - Automatic attendance with the 80% rule (Google Workspace) or a CSV import.
+  - A teacher's one-tap post-class page that never shows parent contacts.
+  - Admin only works the **Needs review** list.
+- **Invoices:** JETA-YYYY-0001 numbering, logo and company details with TRN, and optional 5% VAT.
+- **Payouts:** rate rules by subject, grade or batch, and monthly or fortnightly cycles.
+- **Security:** two-step sign-in for Owner, Admin and Accounts, encryption at rest, a full audit log, and logged exports limited to managers.
+
 ## Sales leaderboard
 
 Every sales portal has a **Leaderboard** (Board tab on phones) and a standing card on the dashboard. It is scored automatically from logged work, so there's nothing extra to enter.

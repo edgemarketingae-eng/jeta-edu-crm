@@ -6,9 +6,30 @@ const { notify, sendExternal } = require('../notify');
 
 const toAED = (amount, currency) => (currency === 'INR' ? amount / config.exchangeRate.INR_PER_AED : amount);
 
+// Invoice numbers per year: JETA-2026-0001 (prefix from Settings → Company).
+function nextInvoiceNo() {
+  const prefix = require('./settings').get('company').invoice_prefix || 'JETA';
+  const year = new Date().getUTCFullYear();
+  const like = `${prefix}-${year}-%`;
+  const last = q.get('SELECT invoice_no FROM payments WHERE invoice_no LIKE ? ORDER BY id DESC LIMIT 1', like)?.invoice_no;
+  const n = last ? Number(last.split('-').pop()) + 1 : 1;
+  return `${prefix}-${year}-${String(n).padStart(4, '0')}`;
+}
+// Prices are VAT-inclusive; when VAT is on the invoice shows the VAT part separately.
+function vatOf(amount) {
+  const c = require('./settings').get('company');
+  if (!c.vat_enabled) return 0;
+  const r = Number(c.vat_rate) / 100;
+  return +(amount - amount / (1 + r)).toFixed(2);
+}
+
 function recordPayment(p, user) {
+  const paid = ['Paid', 'Partial'].includes(p.status);
   const id = insert('payments', {
-    invoice_no: nextCode('payments', 'INV'), student_id: p.student_id || null, lead_id: p.lead_id || null,
+    vat_amount: vatOf(Number(p.amount)),
+    verified_at: paid && user && ['accounts', 'owner'].includes(user.role) ? now() : null,
+    verified_by: paid && user && ['accounts', 'owner'].includes(user.role) ? user.id : null,
+    invoice_no: nextInvoiceNo(), student_id: p.student_id || null, lead_id: p.lead_id || null,
     package_id: p.package_id || null, amount: Number(p.amount), currency: p.currency,
     method: p.method || null, reference: p.reference || null, instalment_no: p.instalment_no || 1,
     due_date: p.due_date || null, paid_at: ['Paid', 'Partial'].includes(p.status) ? (p.paid_at || now()) : null,
@@ -17,15 +38,28 @@ function recordPayment(p, user) {
   const pay = q.get('SELECT * FROM payments WHERE id=?', id);
   if (pay.student_id) log('student', pay.student_id, 'payment', `${pay.invoice_no}: ${pay.currency} ${pay.amount} – ${pay.status}${pay.due_date ? ` (due ${pay.due_date})` : ''}`, { userId: user?.id });
   if (['Paid', 'Partial'].includes(pay.status)) sendInvoice(pay);
-  return pay;
+  if (paid && !pay.verified_at) notify({ role: 'accounts', title: 'Payment to verify', body: `${pay.invoice_no} ${pay.currency} ${pay.amount} (${pay.method || ''} ${pay.reference || ''})`, link: '#/accounts?tab=verify', dedupe: `ver:${pay.id}` });
+  return q.get('SELECT * FROM payments WHERE id=?', id);
+}
+
+// Accounts confirms the money actually arrived (blueprint 2: "Verify payments").
+function verifyPayment(paymentId, user) {
+  const p = q.get('SELECT * FROM payments WHERE id=?', paymentId) || fail(404, 'Payment not found');
+  if (!['Paid', 'Partial'].includes(p.status)) fail(400, 'Only received payments can be verified');
+  if (p.verified_at) fail(400, 'Already verified');
+  update('payments', p.id, { verified_at: now(), verified_by: user.id });
+  if (p.student_id) log('student', p.student_id, 'payment', `${p.invoice_no} verified by Accounts`, { userId: user.id });
+  return q.get('SELECT * FROM payments WHERE id=?', p.id);
 }
 
 function sendInvoice(pay) {
   const s = pay.student_id ? q.get('SELECT * FROM students WHERE id=?', pay.student_id) : null;
   if (!s) return;
-  const text = `Jeta Edu ${pay.status === 'Pending' ? 'Invoice' : 'Receipt'} ${pay.invoice_no}: ${pay.currency} ${pay.amount.toFixed(2)} for ${s.child_name}. Thank you!`;
+  const brand = require('./settings').get('company').name;
+  const text = `${brand} ${pay.status === 'Pending' ? 'Invoice' : 'Receipt'} ${pay.invoice_no}: ${pay.currency} ${pay.amount.toFixed(2)} for ${s.child_name}. Thank you!`;
   sendExternal('whatsapp', s.phone, text);
   sendExternal('email', s.email, text);
+  q.run('UPDATE payments SET invoice_sent_at=COALESCE(invoice_sent_at, ?) WHERE id=?', now(), pay.id);
 }
 
 function markPaid(paymentId, body, user) {
@@ -33,8 +67,9 @@ function markPaid(paymentId, body, user) {
   if (!['Pending', 'Partial'].includes(p.status)) fail(400, `Payment is ${p.status}`);
   if (!body.method || !body.reference) fail(400, 'Method and reference are required');
   const amount = body.amount ? Number(body.amount) : p.amount;
+  const acc = ['accounts', 'owner'].includes(user.role);
   update('payments', p.id, { status: amount >= p.amount ? 'Paid' : 'Partial', method: body.method, reference: body.reference,
-    paid_at: body.paid_at || now(), collected_by: user.id });
+    paid_at: body.paid_at || now(), collected_by: user.id, ...(acc ? { verified_at: now(), verified_by: user.id } : {}) });
   const fresh = q.get('SELECT * FROM payments WHERE id=?', p.id);
   if (p.student_id) {
     log('student', p.student_id, 'payment', `${p.invoice_no} paid via ${body.method} (${body.reference})`, { userId: user.id });
@@ -76,19 +111,46 @@ function addExpense(body) {
 }
 
 // ---------- Teacher payouts ----------
-function monthRange(month) {
-  const [y, m] = month.split('-').map(Number);
-  return [new Date(Date.UTC(y, m - 1, 1)).toISOString(), new Date(Date.UTC(y, m, 1)).toISOString()];
+// Payout periods: 'YYYY-MM' (monthly) or 'YYYY-MM-H1' (1st–15th) / 'YYYY-MM-H2' (16th–end) for fortnightly.
+function monthRange(period) {
+  const [y, m, half] = String(period).split('-');
+  const Y = Number(y); const M = Number(m);
+  if (half === 'H1') return [new Date(Date.UTC(Y, M - 1, 1)).toISOString(), new Date(Date.UTC(Y, M - 1, 16)).toISOString()];
+  if (half === 'H2') return [new Date(Date.UTC(Y, M - 1, 16)).toISOString(), new Date(Date.UTC(Y, M, 1)).toISOString()];
+  return [new Date(Date.UTC(Y, M - 1, 1)).toISOString(), new Date(Date.UTC(Y, M, 1)).toISOString()];
+}
+const validPeriod = (p) => /^\d{4}-\d{2}(-H[12])?$/.test(p || '');
+// Periods a class date belongs to (used for month locks).
+const periodsOf = (iso) => { const mo = iso.slice(0, 7); return [mo, `${mo}-${Number(iso.slice(8, 10)) <= 15 ? 'H1' : 'H2'}`]; };
+function periodNow(cycle) {
+  const d = new Date().toISOString();
+  return cycle === 'fortnightly' ? periodsOf(d)[1] : d.slice(0, 7);
+}
+
+// Rate per hour for one class: most specific teacher rate rule (subject / grade / batch type), else the base rate.
+function rateFor(teacher, c, rules) {
+  if (c.is_demo && teacher.demo_rate) return teacher.demo_rate;
+  const subj = String(c.subject || '').split(',')[0].trim().toLowerCase();
+  let best = null; let score = -1;
+  for (const r of rules) {
+    if (r.subject && r.subject.toLowerCase() !== subj) continue;
+    if (r.grade && String(r.grade) !== String(c.grade || '')) continue;
+    if (r.batch_type && r.batch_type !== (c.batch_type || '1:1')) continue;
+    const sc = (r.subject ? 1 : 0) + (r.grade ? 1 : 0) + (r.batch_type ? 1 : 0);
+    if (sc > score) { best = r; score = sc; }
+  }
+  return best ? best.rate : teacher.rate_per_hour;
 }
 
 function buildPayout(teacher, month) {
   const [from, to] = monthRange(month);
-  const rows = q.all(`SELECT c.*, s.child_name FROM classes c JOIN students s ON s.id=c.student_id
+  const rows = q.all(`SELECT c.*, s.child_name, s.grade, s.batch_type FROM classes c JOIN students s ON s.id=c.student_id
     WHERE c.teacher_id=? AND c.teacher_paid_hours>0 AND c.scheduled_at>=? AND c.scheduled_at<?`, teacher.id, from, to);
+  const rules = q.all('SELECT * FROM teacher_rates WHERE teacher_id=?', teacher.id);
   const lines = {};
   let hours = 0; let gross = 0;
   for (const c of rows) {
-    const rate = c.is_demo && teacher.demo_rate ? teacher.demo_rate : teacher.rate_per_hour;
+    const rate = rateFor(teacher, c, rules);
     const key = `${c.student_id}|${c.subject}|${rate}`;
     lines[key] ||= { student: c.child_name, student_id: c.student_id, subject: c.subject, hours: 0, rate, gross: 0, demo: !!c.is_demo };
     lines[key].hours += c.teacher_paid_hours;
@@ -100,7 +162,7 @@ function buildPayout(teacher, month) {
 }
 
 function generatePayouts(month) {
-  if (!/^\d{4}-\d{2}$/.test(month || '')) fail(400, 'Month must be YYYY-MM');
+  if (!validPeriod(month)) fail(400, 'Period must be YYYY-MM, or YYYY-MM-H1 / YYYY-MM-H2 for fortnightly');
   const out = [];
   for (const t of q.all('SELECT * FROM teachers')) {
     const b = buildPayout(t, month);
@@ -187,6 +249,7 @@ function runFinanceRules() {
 }
 
 module.exports = {
+  nextInvoiceNo, vatOf, verifyPayment, rateFor, validPeriod, periodsOf, periodNow,
   toAED, recordPayment, markPaid, refund, addExpense, generatePayouts, buildPayout, adjustPayout,
   approvePayout, payPayout, unlockPayout, reconcile, runFinanceRules, monthRange, getPayout,
 };

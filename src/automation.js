@@ -12,10 +12,24 @@ function runAll() {
     students: students.runStudentRules(),
     finance: finance.runFinanceRules(),
   };
+  require('./services/attendance').pullMeet().catch((e) => console.error('[meet]', e.message));
+  const acc = require('./services/accountability');
+  result.dailySummary = acc.runDailySummary();
+  // Coaching check once a week (Monday, UTC).
+  const wk = `coaching-check:${acc.weekBounds(0)[0].slice(0, 10)}`;
+  if (new Date().getUTCDay() === 1 && !q.get('SELECT 1 FROM settings WHERE key=?', wk)) {
+    q.run('INSERT INTO settings(key,value) VALUES(?,?)', wk, now());
+    result.coaching = acc.runCoaching();
+  }
   // Month-end: draft last month's payouts on the 1st (Admin reviews, Accounts approves).
   const d = new Date();
+  const cycle = require('./services/settings').get('payouts').cycle;
+  let prev = null;
   if (d.getUTCDate() === 1) {
-    const prev = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1)).toISOString().slice(0, 7);
+    const pm = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1)).toISOString().slice(0, 7);
+    prev = cycle === 'fortnightly' ? `${pm}-H2` : pm;
+  } else if (d.getUTCDate() === 16 && cycle === 'fortnightly') prev = `${d.toISOString().slice(0, 7)}-H1`;
+  if (prev) {
     const key = `payouts-generated:${prev}`;
     if (!q.get('SELECT 1 FROM settings WHERE key=?', key)) {
       finance.generatePayouts(prev);

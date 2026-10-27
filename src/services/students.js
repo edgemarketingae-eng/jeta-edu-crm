@@ -42,7 +42,8 @@ function assignTeacher(studentId, body, user) {
     if (size >= config.maxBatchSize) fail(400, `Batch "${batchName}" is full (max ${config.maxBatchSize})`);
   }
   update('students', s.id, { teacher_id: t.id, batch_type: batchType, batch_name: batchName,
-    start_date: body.start_date || now().slice(0, 10), updated_at: now() });
+    start_date: body.start_date || now().slice(0, 10), updated_at: now(),
+    admin_owner_id: s.admin_owner_id || (['admin', 'owner'].includes(user.role) ? user.id : null) });
   log('student', s.id, 'system', `Teacher assigned: ${t.name} (${batchType}${batchName ? ` – ${batchName}` : ''})`, { userId: user.id });
   q.run("UPDATE tasks SET status='Done', done_at=? WHERE entity='student' AND entity_id=? AND type='assign_teacher' AND status='Open'", now(), s.id);
   if (['Awaiting Teacher', 'Teacher Assigned'].includes(s.stage)) setStage(s, 'Teacher Assigned', user);
@@ -91,15 +92,15 @@ function schedule(studentId, body, user) {
     const clash = hasClash(s.teacher_id, at, duration);
     if (clash) { clashes.push(at); continue; }
     created.push(insert('classes', { student_id: s.id, teacher_id: s.teacher_id, subject: body.subject || s.subjects,
-      scheduled_at: at, duration_hours: duration, status: 'Scheduled', created_at: now() }));
+      scheduled_at: at, duration_hours: duration, status: 'Scheduled', meet_link: body.meet_link || s.meet_link || null, created_at: now() }));
     budget -= duration;
   }
-  update('students', s.id, { schedule_days: days.join(','), schedule_time: body.time, timezone: tz, updated_at: now() });
+  update('students', s.id, { schedule_days: days.join(','), schedule_time: body.time, timezone: tz, updated_at: now(), ...(body.meet_link ? { meet_link: body.meet_link } : {}) });
   log('student', s.id, 'system', `Schedule set: ${days.join(', ')} at ${body.time} (${tz}), ${created.length} classes created${clashes.length ? `, ${clashes.length} skipped (teacher clash)` : ''}`, { userId: user.id });
   if (['Teacher Assigned', 'Awaiting Teacher'].includes(s.stage) && created.length) setStage(s, 'Scheduled', user);
   const t = q.get('SELECT * FROM teachers WHERE id=?', s.teacher_id);
   sendExternal('whatsapp', s.phone, `Classes for ${s.child_name} with ${t.name}: ${days.join(', ')} at ${body.time} (${tz}).`);
-  sendExternal('whatsapp', t.phone, `New schedule: ${s.child_name}, ${days.join(', ')} at ${body.time} (${tz}).`);
+  sendExternal('whatsapp', t.phone, `New schedule: ${s.child_name.split(' ')[0]}, ${days.join(', ')} at ${body.time} (${tz}). After each class, confirm it here: ${require('./attendance').portalUrl(t.id)}`);
   return { created: created.length, clashes };
 }
 
@@ -111,13 +112,14 @@ function addClass(studentId, body, user) {
   const hrs = Number(body.duration_hours) || 1;
   if (hasClash(teacherId, at, hrs)) fail(409, 'Duplicate class: teacher already has a class at that time');
   const id = insert('classes', { student_id: s.id, teacher_id: teacherId, subject: body.subject || s.subjects, scheduled_at: at,
-    duration_hours: hrs, status: 'Scheduled', is_demo: body.is_demo ? 1 : 0, created_at: now() });
+    duration_hours: hrs, status: 'Scheduled', is_demo: body.is_demo ? 1 : 0, meet_link: body.meet_link || s.meet_link || null, created_at: now() });
   log('student', s.id, 'class', `Class added for ${at}${body.is_demo ? ' (demo)' : ''}`, { userId: user.id });
   return q.get('SELECT * FROM classes WHERE id=?', id);
 }
 
 function payoutLocked(teacherId, iso) {
-  return !!q.get('SELECT 1 FROM payouts WHERE teacher_id=? AND month=? AND locked=1', teacherId, monthOf(iso));
+  const [mo, half] = require('./finance').periodsOf(iso);
+  return !!q.get('SELECT 1 FROM payouts WHERE teacher_id=? AND month IN (?,?) AND locked=1', teacherId, mo, half);
 }
 
 // Section 10.4 – attendance drives hours and teacher pay.
@@ -144,7 +146,7 @@ function markAttendance(classId, body, user) {
     if (body.status === 'Rescheduled' || (!policy.deductHours && body.reschedule_to)) {
       const at = new Date(body.reschedule_to).toISOString();
       if (hasClash(c.teacher_id, at, c.duration_hours, c.id)) fail(409, 'Teacher already has a class at the new time');
-      insert('classes', { student_id: c.student_id, teacher_id: c.teacher_id, subject: c.subject, scheduled_at: at,
+      insert('classes', { student_id: c.student_id, teacher_id: c.teacher_id, subject: c.subject, scheduled_at: at, meet_link: c.meet_link,
         duration_hours: c.duration_hours, status: 'Scheduled', is_demo: c.is_demo, reschedule_reason: body.reschedule_reason || body.remarks, created_at: now() });
       log('student', s.id, 'class', `Rescheduled to ${at} – ${body.reschedule_reason || body.remarks}`, { userId: user.id });
     }

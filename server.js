@@ -10,10 +10,17 @@ const SEED_DEMO = process.env.SEED_DEMO ? process.env.SEED_DEMO === 'true' : !PR
 
 db(); // open + migrate
 
+// Encryption at rest: a real key is required on production servers.
+const secure = require('./src/secure');
+if (PROD && !secure.hasRealKey() && !SEED_DEMO) {
+  console.error('Set ENCRYPTION_KEY (64 hex characters – generate with: openssl rand -hex 32). It encrypts bank details, KYC and 2FA secrets.');
+  process.exit(1);
+}
+
 // First boot: create the Owner account (or demo data).
 if (!q.get('SELECT 1 FROM users LIMIT 1')) {
   if (SEED_DEMO) {
-    require('./src/seed').seed();
+    require('./src/context').run({ noAudit: true }, () => require('./src/seed').seed());
     q.run("INSERT OR REPLACE INTO settings(key,value) VALUES('demo','1')");
     console.log('Seeded demo data. Login: owner@jeta.edu / jeta1234');
   } else {
@@ -29,9 +36,15 @@ if (!q.get('SELECT 1 FROM users LIMIT 1')) {
   }
 }
 
+{ const n = secure.encryptExisting(q); if (n) console.log(`Encrypted ${n} sensitive field(s) at rest.`); }
+
 const app = express();
 app.disable('x-powered-by');
 if (process.env.TRUST_PROXY) app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : process.env.TRUST_PROXY);
+
+// Request context: lets the audit log know who made each change.
+const { als } = require('./src/context');
+app.use((req, res, next) => als.run({ userId: null }, next));
 
 // Baseline security headers (Nginx may add HSTS on top).
 app.use((req, res, next) => {
@@ -65,6 +78,7 @@ app.use(express.json({ limit: '5mb' }));
 app.get('/api/app-info', (req, res) => res.json({ demo: !!q.get("SELECT 1 FROM settings WHERE key='demo'") }));
 app.use('/api', require('./src/routes'));
 app.get('/health', (req, res) => { q.get('SELECT 1'); res.json({ ok: true }); });
+app.get('/t/:token', (req, res) => res.sendFile(path.join(__dirname, 'public', 'teacher.html')));
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: PROD ? '1h' : 0 }));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 

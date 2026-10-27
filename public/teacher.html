@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1F5C4E">
+  <meta name="robots" content="noindex">
+  <title>My classes · Jeta Edu</title>
+  <link rel="icon" type="image/png" href="/icon-192.png">
+  <link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root { --board:#1F5C4E; --tint:#E3EFEA; --ink:#1D2926; --ink2:#56645F; --line:#DCE3DF; --chalk:#F3F6F4; --amber:#FBF1DC; --red:#B93A2A; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 16px/1.45 'Schibsted Grotesk', system-ui, sans-serif; color: var(--ink); background: var(--chalk); }
+    header { background: var(--board); color: #fff; padding: calc(18px + env(safe-area-inset-top)) 18px 18px; }
+    header h1 { margin: 0; font-size: 21px; }
+    header p { margin: 4px 0 0; color: #B9D4CB; font-size: 14px; }
+    main { padding: 14px 14px 40px; max-width: 620px; margin: 0 auto; }
+    h2 { font-size: 15px; color: var(--ink2); font-weight: 600; margin: 20px 4px 8px; }
+    .card { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; }
+    .card.todo { border-color: var(--board); box-shadow: 0 0 0 1px var(--board) inset; }
+    .row { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+    .when { font-weight: 700; }
+    .muted { color: var(--ink2); font-size: 14px; }
+    .pill { display: inline-block; font-size: 12.5px; padding: 1px 9px; border-radius: 99px; background: #EEF1EF; color: var(--ink2); }
+    .pill.ok { background: var(--tint); color: var(--board); }
+    .pill.todo { background: var(--amber); color: #8A5D04; }
+    a.join { display: inline-block; margin-top: 10px; color: var(--board); font-weight: 600; text-decoration: none; }
+    button { font: inherit; font-weight: 600; border-radius: 10px; border: 1px solid var(--line); background: #fff; padding: 12px 14px; min-height: 48px; cursor: pointer; }
+    button.primary { background: var(--board); color: #fff; border-color: var(--board); width: 100%; margin-top: 12px; }
+    .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0 12px; }
+    .seg button.on { background: var(--tint); border-color: var(--board); color: var(--board); }
+    label { display: block; font-size: 13.5px; color: var(--ink2); margin: 10px 0 4px; }
+    input { font: inherit; width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; min-height: 46px; font-size: 16px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .err { color: var(--red); font-size: 14px; margin-top: 8px; }
+    .empty { text-align: center; color: var(--ink2); padding: 30px 10px; }
+    .note { font-size: 13px; color: var(--ink2); margin-top: 24px; text-align: center; }
+  </style>
+</head>
+<body>
+  <header><h1 id="hello">My classes</h1><p>Confirm each class right after it ends – it takes 20 seconds.</p></header>
+  <main id="main"><div class="empty">Loading…</div></main>
+  <script>
+  (() => {
+    const token = location.pathname.split('/').pop();
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const when = (iso, zone) => new Date(iso).toLocaleString('en-GB', { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: zone || undefined });
+    const zoneName = (z) => ({ 'Asia/Kolkata': 'India time', 'Asia/Dubai': 'UAE time' }[z] || z || '');
+    const hm = (iso, addMin = 0, zone) => new Date(new Date(iso).getTime() + addMin * 60000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: zone });
+    async function load() {
+      const res = await fetch(`/api/t/${token}`);
+      const data = await res.json();
+      const main = document.getElementById('main');
+      if (!res.ok) { main.innerHTML = `<div class="empty">${esc(data.error)}</div>`; return; }
+      document.getElementById('hello').textContent = `Hi ${data.teacher.name.split(' ')[0]}`;
+      const todo = data.classes.filter((c) => c.needs_confirmation);
+      const upcoming = data.classes.filter((c) => new Date(c.scheduled_at) >= new Date());
+      const done = data.classes.filter((c) => c.teacher_confirmed_at);
+      const card = (c) => `<div class="card ${c.needs_confirmation ? 'todo' : ''}" data-id="${c.id}">
+        <div class="row"><span class="when">${when(c.scheduled_at, c.timezone)} <span class="muted">${esc(zoneName(c.timezone))}</span></span>${c.teacher_confirmed_at ? '<span class="pill ok">Confirmed</span>' : c.needs_confirmation ? '<span class="pill todo">Confirm now</span>' : `<span class="pill">${c.duration_hours} hr</span>`}</div>
+        <div>${esc(c.child_name)} · Grade ${esc(c.grade || '–')} ${esc(c.board || '')} · ${esc(c.subject || '')}${c.is_demo ? ' · Demo' : ''}</div>
+        ${c.meet_link && !c.teacher_confirmed_at ? `<a class="join" href="${esc(c.meet_link)}" target="_blank" rel="noopener">Join Google Meet</a>` : ''}
+        ${c.needs_confirmation ? form(c) : c.topic ? `<div class="muted">Topic: ${esc(c.topic)}</div>` : ''}</div>`;
+      const form = (c) => `<form class="confirm" data-id="${c.id}" novalidate>
+        <label>Did the class happen?</label><div class="seg" data-name="held"><button type="button" data-v="yes" class="on">Yes</button><button type="button" data-v="no">No</button></div>
+        <div class="if-held"><label>Did the student attend?</label><div class="seg" data-name="student_attended"><button type="button" data-v="yes" class="on">Yes</button><button type="button" data-v="no">No</button></div>
+        <div class="grid"><div><label>Started</label><input name="start_time" type="time" value="${hm(c.scheduled_at, 0, c.timezone)}"></div>
+        <div><label>Ended</label><input name="end_time" type="time" value="${hm(c.scheduled_at, c.duration_hours * 60, c.timezone)}"></div></div>
+        <label>Topic covered</label><input name="topic" placeholder="e.g. Quadratic equations – factorisation">
+        <label>Proof link (Meet screenshot or class notes)</label><input name="proof_link" type="url" placeholder="https://…"></div>
+        <button class="primary">Confirm class</button><div class="err" hidden></div></form>`;
+      main.innerHTML = `${todo.length ? `<h2>To confirm (${todo.length})</h2>${todo.map(card).join('')}` : '<div class="card">All your recent classes are confirmed. Thank you.</div>'}
+        ${upcoming.length ? `<h2>Coming up</h2>${upcoming.map(card).join('')}` : ''}
+        ${done.length ? `<h2>Confirmed this week</h2>${done.map(card).join('')}` : ''}
+        <p class="note">Class times are in the student's time zone. Keep this link private.</p>`;
+      main.querySelectorAll('form.confirm').forEach((f) => {
+        const state = { held: 'yes', student_attended: 'yes' };
+        f.querySelectorAll('.seg').forEach((seg) => seg.querySelectorAll('button').forEach((b) => b.onclick = () => {
+          seg.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+          state[seg.dataset.name] = b.dataset.v;
+          if (seg.dataset.name === 'held') f.querySelector('.if-held').hidden = b.dataset.v === 'no';
+        }));
+        f.onsubmit = async (e) => {
+          e.preventDefault();
+          const err = f.querySelector('.err'); err.hidden = true;
+          const body = { held: state.held, student_attended: state.student_attended, start_time: f.start_time.value, end_time: f.end_time.value, topic: f.topic.value.trim(), proof_link: f.proof_link.value.trim() };
+          const btn = f.querySelector('button.primary'); btn.disabled = true; btn.textContent = 'Saving…';
+          const r = await fetch(`/api/t/${token}/classes/${f.dataset.id}/confirm`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const j = await r.json();
+          if (!r.ok) { err.textContent = j.error; err.hidden = false; btn.disabled = false; btn.textContent = 'Confirm class'; return; }
+          load();
+        };
+      });
+    }
+    load();
+  })();
+  </script>
+</body>
+</html>

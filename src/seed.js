@@ -26,7 +26,7 @@ function seed() {
   const teacher = (name, country, subjects, grades, rate) => insert('teachers', {
     name, country, currency: config.currencyByCountry[country], subjects, grades, boards: 'CBSE,ICSE',
     availability: 'Mon-Fri 4pm-9pm', rate_per_hour: rate, demo_rate: Math.round(rate * 0.5),
-    bank_details: 'Bank: ****1234', phone: '+000000000', status: 'Active', created_at: now() });
+    bank_details: 'Bank: ****1234', phone: '+000000000', email: `${name.split(' ')[0].toLowerCase()}@teachers.jetaedu.example`, status: 'Active', created_at: now() });
   const tMath = teacher('Anjali Menon', 'India', 'Maths,Physics', '8,9,10,11,12', 450);
   const tSci = teacher('Deepak Nair', 'India', 'Chemistry,Biology,Science', '6,7,8,9,10', 400);
   teacher('Sara Thomas', 'UAE', 'English,Social Science', '5,6,7,8,9,10', 60);
@@ -50,6 +50,7 @@ function seed() {
     // Backdate creation/assignment across the last ~35 days
     const back = addDays(now(), -(i * 1.1));
     update('leads', lead.id, { created_at: back, assigned_at: back });
+    q.run('UPDATE follow_ups SET set_at=? WHERE lead_id=?', back, lead.id);
     created.push(q.get('SELECT * FROM leads WHERE id=?', lead.id));
   });
   const repOf = (l) => q.get('SELECT * FROM users WHERE id=?', l.owner_id);
@@ -59,7 +60,7 @@ function seed() {
     const plan = i % 9;
     if (plan === 0) return; // stays New
     if (plan === 1) { L.logCall(l.id, { outcome: 'Not answered', notes: 'No answer' }, rep); return; }
-    L.logCall(l.id, { outcome: 'Connected - Interested', notes: 'Wants support before mid-terms', duration_min: 6,
+    L.logCall(l.id, { outcome: 'Connected - Interested', notes: 'Spoke to parent – wants support before mid-terms.\nWeak on concepts, open to a demo this week.', duration_min: 6, sentiment: 'Positive', objections: i % 3 ? ['Timing'] : ['Price'],
       follow_up_at: addMinutes(now(), (i % 4 === 0 ? -90 : 60 * (i % 30))), follow_up_type: 'call' }, rep);
     L.saveCallNotes(l.id, { child: `${l.child_name}, Grade ${l.grade} ${l.board}`, parent: 'Engineer, works till 6pm',
       subjects: `${l.subjects} – weak on concepts`, current: 'Group tuition, too crowded', timing: 'Weekdays 6–8pm, 15 hrs', decision: 'Both parents, start next week' }, rep);
@@ -115,6 +116,7 @@ function seed() {
   const old = created.find((l) => q.get('SELECT stage FROM leads WHERE id=?', l.id).stage === 'Qualified');
   if (old) update('leads', old.id, { assigned_at: addDays(now(), -26) });
   seedGameHistory();
+  seedAccountability(adminU);
   q.run('DELETE FROM notifications'); // start clean; automation regenerates live alerts
 }
 
@@ -122,7 +124,7 @@ function seed() {
 function seedGameHistory() {
   const reps = q.all("SELECT * FROM users WHERE role='sales_exec'");
   const style = { 'aisha@jeta.edu': [26, 32], 'rahul@jeta.edu': [14, 34], 'priya@jeta.edu': [24, 30], 'arjun@jeta.edu': [10, 28] };
-  const outcomes = ['Connected - Interested', 'Not answered', 'Connected - Call back later', 'Busy / Switched off', 'Not answered', 'Connected - Interested'];
+  const outcomes = ['Connected - Interested', 'Not answered', 'Connected - Call back later', 'Busy', 'Not answered', 'Connected - Interested'];
   let seedN = 7;
   const rnd = () => { seedN = (seedN * 9301 + 49297) % 233280; return seedN / 233280; };
   for (const rep of reps) {
@@ -137,11 +139,23 @@ function seedGameHistory() {
       for (let c = 0; c < calls; c++) {
         const at = addMinutes(`${day.slice(0, 10)}T05:00:00.000Z`, Math.floor(rnd() * 600));
         const outcome = outcomes[Math.floor(rnd() * outcomes.length)];
-        insert('activities', { entity: 'lead', entity_id: leadIds[Math.floor(rnd() * leadIds.length)], type: 'call', outcome,
-          body: '', meta: JSON.stringify({ duration_min: outcome.startsWith('Connected') ? 2 + Math.floor(rnd() * 8) : 0 }), user_id: rep.id, created_at: at });
+        const conn = outcome.startsWith('Connected');
+        const noteText = conn && rnd() > (rep.email === 'arjun@jeta.edu' ? 0.25 : 0.06)
+          ? ['Parent keen, child struggling with algebra.\nAgreed to share demo slots on WhatsApp.', 'Spoke to father – wants results before finals.\nBudget fits 15 hrs, deciding this week.',
+            'Mother asked about teacher experience and timings.\nCalling back after she checks with the school.'][Math.floor(rnd() * 3)] : '';
+        insert('activities', { entity: 'lead', entity_id: leadIds[Math.floor(rnd() * leadIds.length)], type: 'call', outcome, direction: 'outbound', source: rnd() < 0.4 ? 'tracker' : 'manual',
+          body: noteText, meta: JSON.stringify({ duration_min: conn ? 2 + Math.floor(rnd() * 8) : 0, sentiment: conn ? ['Positive', 'Neutral', 'Neutral', 'Negative'][Math.floor(rnd() * 4)] : null,
+            objections: conn && rnd() < 0.4 ? [['Price', 'Timing', 'Need to discuss', 'Competitor'][Math.floor(rnd() * 4)]] : [] }), user_id: rep.id, created_at: at });
       }
       if (rnd() < 0.5) insert('activities', { entity: 'lead', entity_id: leadIds[0], type: 'whatsapp', outcome: 'Replied', body: 'Parent replied', user_id: rep.id, created_at: addMinutes(day, 60) });
       if (rnd() < 0.18) insert('activities', { entity: 'lead', entity_id: leadIds[Math.floor(rnd() * leadIds.length)], type: 'stage', body: 'Qualified → Demo Scheduled', user_id: rep.id, created_at: addMinutes(day, 120) });
+      // Follow-up history for on-time % (most on time; weaker reps miss more)
+      for (let f = 0; f < 4; f++) {
+        const due = addMinutes(`${day.slice(0, 10)}T06:00:00.000Z`, f * 120);
+        const miss = rnd() < (rep.email === 'arjun@jeta.edu' ? 0.3 : rep.email === 'rahul@jeta.edu' ? 0.14 : 0.06);
+        insert('follow_ups', { lead_id: leadIds[Math.floor(rnd() * leadIds.length)], owner_id: rep.id, due_at: due, type: 'call', set_at: addDays(due, -1),
+          status: 'Done', done_at: addMinutes(due, miss ? 200 : 20), on_time: miss ? 0 : 1 });
+      }
     }
   }
   // A little peer recognition to start the feed
@@ -152,13 +166,63 @@ function seedGameHistory() {
   }
 }
 
+// Realistic first-call times, verified payments, Meet links, and a few items in each review queue.
+function seedAccountability(adminU) {
+  const A = require('./services/attendance');
+  const H = require('./services/history');
+  const P = require('./services/phone');
+  // First calls mostly inside the 15-minute SLA
+  let i = 0;
+  for (const l of q.all('SELECT id, assigned_at, first_call_at FROM leads WHERE first_call_at IS NOT NULL')) {
+    const mins = i++ % 5 === 4 ? 40 : 4 + (i % 9);
+    q.run('UPDATE leads SET first_call_at=?, sla_breached=0 WHERE id=?', addMinutes(l.assigned_at, mins), l.id);
+  }
+  // KYC submitted the same day, payments verified by Accounts
+  q.run("UPDATE kyc SET submitted_at=COALESCE(verified_at, updated_at)");
+  const acc = q.get("SELECT id FROM users WHERE role='accounts'");
+  const paid = q.all("SELECT id, paid_at FROM payments WHERE status IN ('Paid','Partial')");
+  paid.forEach((p, k) => { if (k < paid.length - 2) q.run('UPDATE payments SET verified_at=?, verified_by=?, invoice_sent_at=? WHERE id=?', addMinutes(p.paid_at, 180), acc.id, addMinutes(p.paid_at, 2), p.id); });
+  // Jeta-owned Meet links on scheduled students
+  const codes = ['ahx-qmpt-rwe', 'kvd-ytns-bfa', 'pqe-mzzu-hrc', 'wjt-nbcv-kla', 'roe-ffda-piu'];
+  q.all('SELECT id FROM students WHERE teacher_id IS NOT NULL').forEach((st, k) => {
+    const link = `https://meet.google.com/${codes[k % codes.length]}`;
+    q.run('UPDATE students SET meet_link=? WHERE id=?', link, st.id);
+    q.run('UPDATE classes SET meet_link=? WHERE student_id=?', link, st.id);
+  });
+  // A teacher-form confirmation with a time mismatch -> Needs review
+  const past = q.get("SELECT c.*, t.portal_token FROM classes c JOIN teachers t ON t.id=c.teacher_id WHERE c.status='Scheduled' AND c.scheduled_at < ? ORDER BY c.scheduled_at DESC LIMIT 1", now());
+  if (past) {
+    const token = A.portalToken(past.teacher_id);
+    const tz = q.get('SELECT timezone FROM students WHERE id=?', past.student_id).timezone;
+    const off = tz === 'Asia/Kolkata' ? 330 : 240;
+    const local = new Date(new Date(past.scheduled_at).getTime() + off * 60000);
+    const hm = (d0) => `${String(d0.getUTCHours()).padStart(2, '0')}:${String(d0.getUTCMinutes()).padStart(2, '0')}`;
+    try { A.teacherConfirm(token, past.id, { held: 'yes', student_attended: 'yes', start_time: hm(local), end_time: hm(new Date(local.getTime() + 35 * 60000)), topic: 'Revision – chapter test' }); } catch { /* ignore */ }
+  }
+  // One tracked call waiting for notes (phone tracker) for Aisha
+  const aisha = q.get("SELECT * FROM users WHERE email='aisha@jeta.edu'");
+  const lead = q.get("SELECT * FROM leads WHERE owner_id=? AND stage NOT IN ('Converted','Lost') AND archived=0 LIMIT 1", aisha.id);
+  if (lead) {
+    const dev = P.createPairing(aisha, 'Company phone');
+    const pr = P.pairDevice({ code: dev.code, device_name: 'Samsung Galaxy A35' });
+    P.ingest(aisha, [{ event_id: 'demo-1', number: lead.phone, direction: 'outgoing', started_at: addMinutes(now(), -6), duration_sec: 185 }], { deviceId: pr.device_id });
+  }
+  // A note-edit request older than 24h waiting for the manager
+  const old = q.get("SELECT a.* FROM activities a JOIN users u ON u.id=a.user_id WHERE a.type='call' AND u.role='sales_exec' AND a.body<>'' AND a.created_at < ? ORDER BY a.id LIMIT 1", addDays(now(), -2));
+  if (old) {
+    try { H.editActivity(old.id, { body: `${old.body}\nCorrection: parent asked for weekend slots.`, reason: 'Forgot to add weekend preference' }, q.get('SELECT * FROM users WHERE id=?', old.user_id)); } catch { /* ignore */ }
+  }
+  // Demo company details for the invoice template
+  require('./services/settings').set('company', { address: 'Office 1204, Business Bay\nDubai, United Arab Emirates', phone: '+971 4 000 0000', email: 'accounts@jetaedu.example', website: 'jetaedu.example' });
+}
+
 if (require.main === module) {
   if (process.argv.includes('--reset')) {
     const file = config.dbPath;
     for (const f of [file, `${file}-wal`, `${file}-shm`]) if (fs.existsSync(f)) fs.unlinkSync(f);
   }
   db();
-  seed();
+  require('./context').run({ noAudit: true }, () => seed());
   require('./automation').runAll();
   console.log('Seeded. Login with owner@jeta.edu / jeta1234 (see README for all roles).');
 }

@@ -15,10 +15,11 @@
       method, headers: { 'Content-Type': 'application/json', ...(S.token ? { Authorization: `Bearer ${S.token}` } : {}) },
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (res.status === 401 && path !== '/login') { logout(); throw new Error('Please sign in again'); }
+    if (res.status === 401 && !path.startsWith('/login')) { logout(); throw new Error('Please sign in again'); }
     const type = res.headers.get('content-type') || '';
     const data = type.includes('json') ? await res.json() : await res.text();
-    if (!res.ok) throw new Error(data.error || data || `Request failed (${res.status})`);
+    if (res.status === 403 && data.code === '2FA_SETUP') { render2faSetup(); throw new Error(data.error); }
+    if (!res.ok) throw Object.assign(new Error(data.error || data || `Request failed (${res.status})`), { data, status: res.status });
     return data;
   }
   const get = (p) => api('GET', p);
@@ -69,7 +70,7 @@
     Completed: '', Renewed: 'green', Churned: 'red', Paused: '',
     Paid: 'green', Partial: 'amber', Pending: 'amber', Refunded: '', 'Refund Requested': 'red', 'Refund Approved': 'red',
     Approved: 'blue', Open: 'amber', Done: 'green', 'Renewal Discussion': 'amber',
-    Hot: 'red', Warm: 'amber', Overdue: 'red', Inactive: '', Unmarked: 'red', Demo: 'blue', High: 'red', Cold: 'blue', Submitted: 'blue', Verified: 'green', Rejected: 'red',
+    Hot: 'red', Warm: 'amber', 'On time': 'green', Late: 'red', Due: 'amber', Held: 'green', Resolved: 'green', Rejected: 'red', Overdue: 'red', Inactive: '', Unmarked: 'red', Demo: 'blue', High: 'red', Cold: 'blue', Submitted: 'blue', Verified: 'green', Rejected: 'red',
     'Student Absent (no notice)': 'red', 'Student Absent (notice given)': 'amber', 'Teacher Absent': 'red', Cancelled: '', Rescheduled: 'blue',
   };
   const pill = (s) => (s ? `<span class="pill ${STAGE_PILL[s] || ''}">${esc(s)}</span>` : '');
@@ -149,17 +150,71 @@
       const f = formData(e.target);
       try {
         const r = await post('/login', f);
+        if (r.twofa) return render2faCode(r.ticket);
         S.token = r.token; localStorage.setItem('jeta_token', r.token);
         await boot();
       } catch (err) { const el = $('.err', e.target); el.textContent = err.message; el.hidden = false; }
     });
   }
 
+  // Second step: 6-digit code from the authenticator app.
+  function render2faCode(ticket) {
+    const old = $('#login-form');
+    const form = old.cloneNode(false); // drops the password-step listener
+    old.replaceWith(form);
+    form.innerHTML = `<h2>Two-step sign-in</h2><p class="muted">Enter the 6-digit code from your authenticator app.</p>
+      ${field('Code', input('code', '', 'text', 'inputmode="numeric" autocomplete="one-time-code" maxlength="6" required autofocus'))}
+      <button class="primary" style="width:100%">Verify</button><div class="err" hidden></div>
+      <p class="small" style="margin-top:14px"><button type="button" class="link" id="back-login">Use a different account</button></p>`;
+    $('#back-login').onclick = renderLogin;
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const r = await post('/login/2fa', { ticket, code: form.code.value });
+        S.token = r.token; localStorage.setItem('jeta_token', r.token);
+        await boot();
+      } catch (err) { const el = $('.err', form); el.textContent = err.message; el.hidden = false; }
+    };
+  }
+
+  // Owner, Admin and Accounts must turn on two-factor sign-in before using the CRM (production).
+  async function render2faSetup() {
+    if (document.body.dataset.setup2fa) return;
+    document.body.dataset.setup2fa = '1';
+    const r = await fetch('/api/2fa/setup', { method: 'POST', headers: { Authorization: `Bearer ${S.token}` } }).then((x) => x.json());
+    $('#app').innerHTML = `<div class="login"><div class="art"><div class="brand"><span class="mark">J</span> Jeta Edu</div>
+      <div><h1>Protect your account</h1><p>Your role can see payments, payouts or KYC, so sign-in needs a code from your phone as well as your password.</p></div><div></div></div>
+      <form id="setup-form"><h2>Set up two-step sign-in</h2>
+        <ol class="small" style="padding-left:18px;line-height:1.7"><li>Install Google Authenticator or Microsoft Authenticator.</li><li>Scan this code, or enter the key manually.</li><li>Type the 6-digit code it shows.</li></ol>
+        <div id="qr" style="background:#fff;padding:10px;display:inline-block;border:1px solid var(--line);border-radius:8px;margin:6px 0"></div>
+        <p class="small muted">Key: <code style="word-break:break-all">${esc(r.secret || '')}</code></p>
+        ${field('Code from the app', input('code', '', 'text', 'inputmode="numeric" autocomplete="one-time-code" maxlength="6" required'))}
+        <button class="primary" style="width:100%">Turn on and continue</button><div class="err" hidden></div>
+        <p class="small" style="margin-top:14px"><button type="button" class="link" id="setup-out">Sign out</button></p></form></div>`;
+    $('#setup-out').onclick = () => { delete document.body.dataset.setup2fa; logout(); };
+    const s1 = document.createElement('script');
+    s1.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+    s1.onload = () => { try { new window.QRCode($('#qr'), { text: r.otpauth, width: 180, height: 180 }); } catch { /* manual key still works */ } };
+    document.head.appendChild(s1);
+    $('#setup-form').onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await post('/2fa/enable', { code: e.target.code.value });
+        delete document.body.dataset.setup2fa;
+        toast('Two-step sign-in is on');
+        await boot();
+      } catch (err) { const el = $('.err', e.target); el.textContent = err.message; el.hidden = false; }
+    };
+  }
+
   async function boot() {
     if (!S.token) return renderLogin();
     try {
       const me = await get('/me');
-      S.me = me.user; S.perms = me.perms; S.meta = await get('/meta');
+      S.me = me.user; S.perms = me.perms;
+      if (me.needs2faSetup) return render2faSetup();
+      S.meta = await get('/meta');
+      S.settings = await get('/settings').catch(() => ({}));
       if (!location.hash) location.hash = '#/dashboard';
       route();
     } catch { renderLogin(); }
@@ -167,10 +222,10 @@
 
   // ---------------- layout ----------------
   const NAV = [
-    ['Sales', [['#/dashboard', 'Dashboard'], ['#/leads', 'Leads', 'overdue'], ['#/pipeline', 'Pipeline'], ['#/leaderboard', 'Leaderboard', null, 'game.view'], ['#/tasks', 'My tasks']]],
+    ['Sales', [['#/dashboard', 'Dashboard'], ['#/leads', 'Leads', 'overdue'], ['#/pipeline', 'Pipeline'], ['#/leaderboard', 'Leaderboard', null, 'game.view'], ['#/tasks', 'My tasks'], ['#/scorecard', 'My scorecard'], ['#/phone', 'Phone tracker', null, 'game.view']]],
     ['Academics', [['#/students', 'Students'], ['#/classes', 'Classes & attendance', null, 'students.view'], ['#/teachers', 'Teachers', null, 'teachers.view']]],
     ['Finance', [['#/accounts', 'Accounts', null, 'payments.edit'], ['#/payouts', 'Teacher payouts', null, 'payouts.view']]],
-    ['Admin', [['#/users', 'Users & roles', null, 'users.manage']]],
+    ['Admin', [['#/review', 'Weekly review', null, 'audit.view'], ['#/users', 'Users & roles', null, 'users.manage'], ['#/settings', 'Settings', null, 'settings.manage']]],
   ];
 
   // Line icons for the phone tab bar and header (24px, stroke = currentColor).
@@ -321,6 +376,7 @@
     [/^#\/students$/, pageStudents], [/^#\/students\/(\d+)$/, pageStudent], [/^#\/classes$/, pageClasses],
     [/^#\/teachers$/, pageTeachers], [/^#\/accounts$/, pageAccounts], [/^#\/payouts$/, pagePayouts],
     [/^#\/tasks$/, pageTasks], [/^#\/users$/, pageUsers], [/^#\/leaderboard$/, pageLeaderboard],
+    [/^#\/scorecard$/, pageScorecard], [/^#\/review$/, pageReview], [/^#\/phone$/, pagePhone], [/^#\/settings$/, pageSettings],
   ];
   const qs = () => Object.fromEntries(new URLSearchParams(location.hash.split('?')[1] || ''));
   async function route() {
@@ -352,6 +408,7 @@
     const query = new URLSearchParams({ period: p.period || 'month', ...(p.rep && { rep: p.rep }), ...(p.country && { country: p.country }), ...(p.source && { source: p.source }), ...(p.from && { from: p.from, to: p.to }) });
     const x = await get(`/dashboard?${query}`);
     const team = can('dashboard.team') ? await get('/reports/team') : [];
+    const calls = can('game.view') ? await get(`/call-metrics?period=week${p.rep ? `&rep=${p.rep}` : ''}`).catch(() => null) : null;
     const periods = [['today', 'Today'], ['week', 'This week'], ['month', 'This month'], ['custom', 'Custom']];
     const gameCard = can('game.view') ? await dashGameCard() : '';
     setPage(`${gameCard}<div class="page-head"><div><h1>Dashboard</h1><div class="muted">${d(x.range.from)} – ${d(new Date(new Date(x.range.to) - 1).toISOString())}${role() === 'sales_exec' ? ' · your numbers' : ''}</div></div></div>
@@ -367,7 +424,14 @@
       <div class="kpis">${kpi(x.sales.dials, 'Total dials')}${kpi(x.sales.connected, 'Connected calls')}${kpi(x.sales.notAnswered, 'Not answered')}
         ${kpi(`${x.sales.whatsappSent} / ${x.sales.whatsappReplied}`, 'WhatsApp sent / replied')}${kpi(`${x.sales.talkMinutes} min`, 'Talk time')}
         ${kpi(x.sales.slaPct === null ? '—' : `${x.sales.slaPct}%`, 'First-call SLA met', x.sales.slaPct !== null && x.sales.slaPct < 80)}
+        ${kpi(x.sales.notesPct === null ? '—' : `${x.sales.notesPct}%`, 'Notes completed', x.sales.notesPct !== null && x.sales.notesPct < (S.settings?.compliance?.notesPct || 90))}
         ${kpi(x.sales.followUpsDueToday, 'Follow-ups due today')}${kpi(x.sales.followUpsOverdue, 'Follow-ups overdue', x.sales.followUpsOverdue > 0)}</div>
+      ${calls ? `<div class="panel"><div class="panel-head"><h2>Call analytics · this week</h2><span class="small muted">${calls.trackedShare}% of calls measured by phone tracker / telephony</span></div>
+        <div class="kpis" style="margin:0 0 10px">${kpi(calls.avgCallMinutes === null ? '—' : `${calls.avgCallMinutes} min`, 'Average call')}${kpi(calls.uniqueLeads, 'Unique leads called')}
+          ${kpi(calls.missedIncoming, 'Missed incoming', calls.missedIncoming > 0)}${kpi(calls.missingNotes, 'Calls missing notes', calls.missingNotes > 0)}
+          ${kpi(calls.firstCallAvg || '—', 'Avg first call')}${kpi(calls.maxIdleGapAvgMin === null ? '—' : `${calls.maxIdleGapAvgMin} min`, 'Longest idle gap (avg/day)')}
+          ${kpi(calls.callsPerConversion ?? '—', 'Calls per conversion')}</div>
+        <div class="small">Best calling hours: ${calls.bestHours.length ? calls.bestHours.map((h) => `<b>${esc(h.label)}</b> (${h.rate}% connect)`).join(' · ') : 'not enough calls yet'}</div></div>` : ''}
 
       <div class="dash-grid">
         <div class="panel"><div class="panel-head"><h2>Conversion</h2><span class="muted small">${x.pipeline.newLeads} new leads</span></div>
@@ -413,33 +477,106 @@
         <label class="check"><input type="checkbox" name="is_whatsapp" checked> Phone is on WhatsApp</label>
         <div class="grid3">${field('Child name', input('child_name'))}${field('Grade', input('grade'))}${field('Board', select('board', S.meta.boards, '', '—'))}</div>
         <div class="grid2">${field('Subjects needed', input('subjects', '', 'text', 'placeholder="Maths, Physics"'))}${field('Lead score', select('score', ['Hot', 'Warm', 'Cold'], 'Warm'))}</div>${reps}`,
-      onSubmit: async (f) => { const l = await post('/leads', f); toast(`Lead ${l.code} created${l.owner_id ? '' : ' – no rep available'}`); location.hash = `#/leads/${l.id}`; },
+      onSubmit: async (f) => {
+        try {
+          const l = await post('/leads', f);
+          toast(`Lead ${l.code} created${l.owner_id ? '' : ' – no rep available'}`); location.hash = `#/leads/${l.id}`;
+        } catch (e) {
+          const d = e.data?.duplicate;
+          if (d && (d.owner_id === S.me.id || can('leads.view_all'))) {
+            $('#modal-root').innerHTML = '';
+            toast('That number is already in the CRM – opening the existing lead');
+            location.hash = `#/leads/${d.id}`;
+            return;
+          }
+          throw e;
+        }
+      },
     });
   }
+
+  // Bulk CSV upload (blueprint 4.1 / 4.3): duplicates by phone are skipped and reported.
+  function parseCsv(text) {
+    const rows = []; let row = []; let cell = ''; let qt = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (qt) { if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; } else if (ch === '"') qt = false; else cell += ch; }
+      else if (ch === '"') qt = true;
+      else if (ch === ',' || ch === ';' || ch === '\t') { row.push(cell); cell = ''; }
+      else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+      else cell += ch;
+    }
+    if (cell || row.length) { row.push(cell); rows.push(row); }
+    const clean = rows.filter((r) => r.some((c) => c.trim()));
+    const head = (clean.shift() || []).map((h) => h.trim());
+    return clean.map((r) => Object.fromEntries(head.map((h, i) => [h, (r[i] || '').trim()])));
+  }
+  function importModal() {
+    const isMgr = can('leads.reassign');
+    modal({
+      title: 'Import leads from CSV', submit: 'Import', wide: true,
+      body: `<p class="small muted">Columns (header row): <b>parent_name, phone</b> required; optional source, campaign, ad_set, email, city, country, child_name, grade, board, subjects, score, referral_by.
+        A number already in the CRM is skipped and listed in the report. <a href="#" id="csv-tpl">Download template</a></p>
+        ${field('CSV file', '<input type="file" name="file" accept=".csv,text/csv" required id="csv-file">')}
+        <div id="csv-prev" class="callout" hidden></div>
+        <div class="grid2">${field('Source for rows without one', select('default_source', S.meta.leadSources, 'Meta Ads'))}
+        ${isMgr ? field('Assign to', select('owner_id', salesUsers(), '', 'Round-robin by market')) : '<div></div>'}</div>`,
+      onOpen: (form) => {
+        let rows = [];
+        $('#csv-tpl', form).onclick = (e) => {
+          e.preventDefault();
+          const blob = new Blob(['parent_name,phone,email,source,campaign,country,city,child_name,grade,board,subjects\nFathima K,+971501234567,fathima@example.com,Meta Ads,Oct Exam Prep,UAE,Dubai,Aarav,8,CBSE,Maths\n'], { type: 'text/csv' });
+          const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'leads-template.csv'; a.click();
+        };
+        $('#csv-file', form).onchange = async (e) => {
+          const f = e.target.files[0]; if (!f) return;
+          rows = parseCsv(await f.text());
+          const prev = $('#csv-prev', form); prev.hidden = false;
+          prev.textContent = rows.length ? `${rows.length} rows found. Columns: ${Object.keys(rows[0]).join(', ')}` : 'No rows found – check the header row.';
+          form.dataset.rows = JSON.stringify(rows);
+        };
+      },
+      onSubmit: async (f, form) => {
+        const rows = JSON.parse(form.dataset.rows || '[]');
+        if (!rows.length) throw new Error('Choose a CSV file with at least one row');
+        const r = await post('/leads/import', { rows, default_source: f.default_source, owner_id: f.owner_id });
+        setTimeout(() => modal({ title: 'Import report', body: `<div class="kpis" style="margin-bottom:12px">${kpi(r.created, 'Leads created')}${kpi(r.duplicates.length, 'Duplicates skipped', r.duplicates.length > 0)}${kpi(r.errors.length, 'Rows with errors', r.errors.length > 0)}</div>
+          ${r.duplicates.length ? `<h3>Skipped – already in the CRM</h3><div class="table-wrap" style="margin-bottom:12px"><table><thead><tr><th>Row</th><th>Phone</th><th>Existing lead</th></tr></thead><tbody>${r.duplicates.map((d) => `<tr><td>${d.row}</td><td>${esc(d.phone)}</td><td>${d.lead_id ? `<a href="#/leads/${d.lead_id}">${esc(d.existing)}</a>` : esc(d.existing)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+          ${r.errors.length ? `<h3>Errors</h3><div class="table-wrap"><table><thead><tr><th>Row</th><th>Problem</th></tr></thead><tbody>${r.errors.map((d) => `<tr><td>${d.row}</td><td>${esc(d.error)}</td></tr>`).join('')}</tbody></table></div>` : ''}` }), 50);
+        reload();
+      },
+    });
+  }
+
+  // Responsibility rule: no action beyond SLA turns the row red (48h untouched, or escalated).
+  const staleCls = (l) => (['Converted', 'Lost'].includes(l.stage) ? '' : (l.escalated || (Date.now() - new Date(l.last_action_at || l.last_contacted_at || l.created_at)) > 48 * 3600000) ? 'due-over' : '');
 
   async function pageLeads() {
     const p = qs();
     const view = p.view || 'open';
     const params = new URLSearchParams({ view, ...p });
     const rows = await get(`/leads?${params}`);
-    const views = [['open', 'All open'], ['today', "Today's follow-ups", 'today'], ['overdue', 'Overdue', 'overdue', true], ['upcoming', 'Next 7 days', 'upcoming'],
-      ['untouched', 'Not touched 48h', 'untouched', true], ['expiring', 'Expiring (day 25+)', 'expiring', true], ['nurture', 'Nurture'], ['flagged', 'Flagged'], ['all', 'All leads']];
+    const views = [['open', 'All open'], ['today', "Today's follow-ups", 'today'], ['overdue', 'Overdue', 'overdue', true], ['escalated', 'Escalated 48h', 'escalated', true], ['upcoming', 'Next 7 days', 'upcoming'],
+      ['untouched', 'Not touched 48h', 'untouched', true], ['expiring', 'Expiring (day 25+)', 'expiring', true], ['nurture', 'Nurture'], ['flagged', 'Flagged'], ['all', 'All leads'],
+      ...(can('leads.reassign') ? [['archived', 'Archived']] : [])];
     setPage(`<div class="page-head"><div><h1>Leads</h1><div class="muted">${rows.length} shown${role() === 'sales_exec' ? ' · your leads' : ''}</div></div>
-      <div class="actions">${can('dashboard.team') ? '<button id="exp">Export CSV</button>' : ''}<a class="btn" href="#/pipeline">Pipeline view</a>${can('leads.edit') ? '<button class="primary" id="nl">New lead</button>' : ''}</div></div>
+      <div class="actions">${can('exports') ? '<button id="exp">Export CSV</button>' : ''}${can('leads.edit') ? '<button id="imp">Import CSV</button>' : ''}<a class="btn" href="#/pipeline">Pipeline view</a>${can('leads.edit') ? '<button class="primary" id="nl">New lead</button>' : ''}</div></div>
+      ${S.counts.missingNotes ? `<div class="callout red">${S.counts.missingNotes} tracked call${S.counts.missingNotes > 1 ? 's' : ''} still need notes. Open the lead and use <b>Add notes</b> on the call.</div>` : ''}
       <nav class="views">${views.map(([v, l, ck, alert]) => `<a href="#/leads?view=${v}" class="${v === view ? 'on' : ''} ${alert && S.counts[ck] ? 'alert' : ''}">${l}${ck ? `<span class="n">${S.counts[ck] ?? 0}</span>` : ''}</a>`).join('')}</nav>
       <form class="filters" id="lf"><input type="hidden" name="view" value="${esc(view)}">
         <input name="search" placeholder="Name, phone, ID" value="${esc(p.search || '')}">
         ${select('stage', S.meta.leadStages, p.stage, 'Any stage')}${select('source', S.meta.leadSources, p.source, 'Any source')}
         ${role() !== 'sales_exec' ? select('owner', salesUsers(), p.owner, 'Any owner') : ''}${select('country', ['UAE', 'India'], p.country, 'Any market')}
         ${select('score', ['Hot', 'Warm', 'Cold'], p.score, 'Any score')}<button>Filter</button></form>
-      <div class="table-wrap">${rows.length ? `<table class="lead-table"><thead><tr><th>Lead</th><th>Child</th><th>Source</th><th>Stage</th><th>Score</th><th>Owner</th><th>Next follow-up</th><th class="r">Attempts</th><th>Assigned</th></tr></thead><tbody>
+      <div class="table-wrap">${rows.length ? `<table class="lead-table"><thead><tr><th>Lead</th><th>Child</th><th>Source</th><th>Stage</th><th>Score</th><th>Owner</th><th>Next follow-up</th><th class="r">Attempts</th><th>Last action</th></tr></thead><tbody>
         ${rows.map((l) => `<tr class="click" data-href="#/leads/${l.id}"><td><a href="#/leads/${l.id}"><b>${esc(l.parent_name)}</b></a>${l.flagged ? ' ' + pill('Flagged') : ''}<div class="small muted">${esc(l.code)} · ${esc(l.phone)}</div></td>
           <td>${esc(l.child_name || '—')}<div class="small muted">${esc([l.grade && `Gr ${l.grade}`, l.board, l.subjects].filter(Boolean).join(' · '))}</div></td>
           <td>${esc(l.source)}<div class="small muted">${esc(l.country)}</div></td><td>${pill(l.stage)}</td><td>${pill(l.score)}</td><td>${esc(l.owner_name || 'Unassigned')}</td>
           <td>${['Converted', 'Lost'].includes(l.stage) ? '—' : dueCell(l.next_follow_up_at)}</td><td class="r num">${l.attempt_count}</td>
-          <td class="small">${ago(l.assigned_at)}${l.reassignment_count ? `<div class="muted">reassigned ${l.reassignment_count}×</div>` : ''}</td></tr>`).join('')}</tbody></table>`
+          <td class="small ${staleCls(l)}">${ago(l.last_action_at || l.last_contacted_at || l.created_at)}${l.escalated ? ' · escalated' : ''}<div class="muted">assigned ${ago(l.assigned_at)}${l.reassignment_count ? ` · reassigned ${l.reassignment_count}×` : ''}</div></td></tr>`).join('')}</tbody></table>`
     : '<div class="empty">No leads in this view. Change the filters or add a new lead.</div>'}</div>`);
     $('#nl') && ($('#nl').onclick = newLeadModal);
+    $('#imp') && ($('#imp').onclick = importModal);
     $('#exp') && ($('#exp').onclick = () => openDoc('/export/leads.csv', 'leads.csv'));
     $('#lf').onsubmit = (e) => { e.preventDefault(); location.hash = `#/leads?${new URLSearchParams(Object.entries(formData(e.target)).filter(([, v]) => v))}`; };
     $$('tr.click').forEach((tr) => tr.addEventListener('click', (e) => { if (e.target.tagName !== 'A') location.hash = tr.dataset.href; }));
@@ -467,10 +604,38 @@
     ['decision', 'Who decides, and when do they want to start'],
     ['summary', 'Call summary'], ['objections', 'Objections'], ['next_step', 'Next step'], ['demo_pref', 'Demo preference'],
   ];
-  const ICON = { call: 'C', whatsapp: 'W', note: 'N', stage: 'S', reassign: 'R', system: '·', kyc: 'K', payment: '$', class: 'L' };
-  const timeline = (acts) => (acts.length ? `<ul class="timeline">${acts.map((a) => `<li><span class="ico ${a.type}">${ICON[a.type] || '·'}</span><div>
-    <div class="when">${dt(a.created_at)} · ${esc(a.user_name || 'System')}${a.outcome ? ` · <b>${esc(a.outcome)}</b>` : ''}</div>
-    <div class="body">${esc(a.body || '')}</div></div></li>`).join('')}</ul>` : '<div class="muted small">Nothing logged yet.</div>');
+  const ICON = { call: 'C', whatsapp: 'W', note: 'N', stage: 'S', reassign: 'R', system: '·', kyc: 'K', payment: '$', class: 'L', demo: 'D', email: '@', walkin: 'V' };
+  const EDITABLE = ['note', 'call', 'whatsapp', 'demo', 'email', 'walkin'];
+  // Conversation log: entries are never deleted; edits keep versions (author within 24h, then manager approval).
+  const timeline = (acts) => (acts.length ? `<ul class="timeline">${acts.map((a) => {
+    const m = (() => { try { return JSON.parse(a.meta || '{}'); } catch { return {}; } })();
+    const chips = [a.direction === 'inbound' ? 'Inbound' : null, a.source === 'tracker' ? 'Phone tracker' : a.source === 'telephony' ? 'Telephony' : null,
+      m.duration_sec ? `${Math.round(m.duration_sec / 60)} min` : m.duration_min ? `${m.duration_min} min` : null, m.sentiment, ...(m.objections || []).map((o) => `Objection: ${o}`)].filter(Boolean);
+    const canEdit = EDITABLE.includes(a.type) && !a.needs_note && a.user_id && (a.user_id === S.me.id || can('leads.reassign'));
+    return `<li><span class="ico ${a.type}">${ICON[a.type] || '·'}</span><div>
+    <div class="when">${dt(a.created_at)} · ${esc(a.user_name || 'System')}${a.outcome ? ` · <b>${esc(a.outcome)}</b>` : ''}${a.version > 1 ? ` · <button class="link small" data-ver="${a.id}">edited</button>` : ''}</div>
+    ${a.needs_note ? `<div class="callout red" style="margin:6px 0">Tracked call – add the outcome and notes. <button class="small primary" data-complete="${a.id}">Add notes</button></div>` : `<div class="body">${esc(a.body || '')}</div>`}
+    ${m.next_step ? `<div class="small"><b>Next step:</b> ${esc(m.next_step)}</div>` : ''}
+    ${chips.length ? `<div class="chips">${chips.map((c) => `<span class="chip">${esc(c)}</span>`).join('')}</div>` : ''}
+    ${m.recording_url ? `<div class="small"><a href="${esc(m.recording_url)}" target="_blank" rel="noopener">Recording</a></div>` : ''}
+    ${canEdit ? `<button class="link small edit-act" data-edit="${a.id}">Edit</button>` : ''}</div></li>`;
+  }).join('')}</ul>` : '<div class="muted small">Nothing logged yet.</div>');
+
+  function bindTimeline(acts, onTracked) {
+    $$('[data-edit]').forEach((b) => { b.onclick = () => {
+      const a = acts.find((x) => String(x.id) === b.dataset.edit);
+      const ownFresh = a.user_id === S.me.id && (Date.now() - new Date(a.created_at)) < 24 * 3600000;
+      modal({ title: 'Edit entry', submit: ownFresh || can('leads.reassign') ? 'Save edit' : 'Send for approval',
+        body: `<p class="small muted">${ownFresh ? 'You can edit your own entries for 24 hours. The previous version is kept.' : can('leads.reassign') ? 'Managers can edit with a reason. The previous version is kept.' : 'This entry is older than 24 hours, so a manager has to approve the change. The original stays on record.'}</p>
+          ${field('Text', `<textarea name="body" required>${esc(a.body || '')}</textarea>`)}${ownFresh ? field('Reason (optional)', input('reason')) : field('Reason *', input('reason', '', 'text', 'required'))}`,
+        onSubmit: async (f) => { const r = await api('PATCH', `/activities/${a.id}`, f); toast(r.pending ? 'Sent to your manager for approval' : 'Entry updated – old version kept'); reload(); } });
+    }; });
+    $$('[data-ver]').forEach((b) => { b.onclick = async () => {
+      const v = await get(`/activities/${b.dataset.ver}/versions`);
+      modal({ title: 'Previous versions', body: v.length ? `<ul class="timeline">${v.map((x) => `<li><span class="ico note">v</span><div><div class="when">${dt(x.created_at)} · changed by ${esc(x.edited_by_name || '—')}${x.reason ? ` · ${esc(x.reason)}` : ''}</div><div class="body">${esc(x.body || '')}</div></div></li>`).join('')}</ul>` : '<div class="muted">No earlier versions.</div>' });
+    }; });
+    $$('[data-complete]').forEach((b) => { b.onclick = () => onTracked && onTracked(Number(b.dataset.complete)); });
+  }
 
   // Tap-to-call and WhatsApp for a parent number. wa.me needs digits only.
   const waLink = (phone) => `https://wa.me/${String(phone || '').replace(/\D/g, '')}`;
@@ -500,12 +665,19 @@
           ${!closed ? '<button id="a-stage">Change stage</button><button id="a-fu">Set follow-up</button>' : ''}
           ${l.stage === 'Lost' ? '<button id="a-reopen">Reopen</button>' : ''}
           ${!closed ? '<button id="a-conv">Convert</button>' : ''}` : ''}
-          ${can('leads.reassign') && !closed ? '<button id="a-re">Reassign</button>' : ''}
+          ${editable && !closed ? '<button id="a-int">Log demo / email / walk-in</button>' : ''}
+          ${can('leads.reassign') && !closed ? '<button id="a-re">Reassign</button><button id="a-ex">Exempt 30-day</button>' : ''}
+          ${can('leads.reassign') && !l.student_id ? `<button id="a-merge">Merge</button>${l.archived ? '<button id="a-restore">Restore</button>' : '<button id="a-arch" class="danger">Archive</button>'}` : ''}
           ${l.student_id ? `<a class="btn" href="#/students/${l.student_id}">Open student</a>` : ''}</div></div>
         <div class="meta"><span>Owner <b>${esc(l.owner_name || 'Unassigned')}</b></span><span>Next follow-up <b>${closed ? '—' : dueCell(l.next_follow_up_at)}</b> ${l.next_follow_up_type ? `<span class="muted">(${esc(l.next_follow_up_type)})</span>` : ''}</span>
           <span>Attempts <b>${l.attempt_count}</b></span><span>Assigned <b>${age === null ? '—' : `day ${age} of 30`}</b>${l.reassignment_count ? ` · reassigned ${l.reassignment_count}×` : ''}</span>
           <span>Source <b>${esc(l.source)}</b>${l.campaign ? ` / ${esc(l.campaign)}` : ''}</span><span>Market <b>${esc(l.country)} (${esc(l.currency)})</b></span></div>
         ${stageTrack}</div>
+      ${x.activities.filter((a) => a.needs_note).map((a) => `<div class="callout red">Tracked call ${dt(a.created_at)}${(() => { try { const m = JSON.parse(a.meta || '{}'); return m.duration_sec ? ` · ${Math.round(m.duration_sec / 60)} min` : ''; } catch { return ''; } })()} has no notes yet. Add them within 10 minutes. <button class="small primary" data-complete="${a.id}">Add notes</button></div>`).join('')}
+      ${l.archived ? `<div class="callout red">Archived${l.merged_into ? ` – merged into <a href="#/leads/${l.merged_into}">another lead</a>` : ''}. History is kept; it is hidden from lists.</div>` : ''}
+      ${l.escalated ? '<div class="callout red">Escalated: the follow-up has been overdue for 48 hours. A manager should take over or reassign.</div>' : ''}
+      ${x.duplicates.filter((d) => !d.archived).length ? `<div class="callout">Same phone number on ${x.duplicates.filter((d) => !d.archived).map((d) => `<a href="#/leads/${d.id}">${esc(d.code)}</a>`).join(', ')}.${can('leads.reassign') ? ' Use Merge to combine them.' : ' Ask your manager to merge.'}</div>` : ''}
+      ${l.exempt_until && l.exempt_until > new Date().toISOString() ? `<div class="callout green">Exempt from auto-reassignment until ${d(l.exempt_until)}: ${esc(l.exempt_reason)}</div>` : ''}
       ${l.sla_breached && !l.first_call_at ? '<div class="callout red">First-call SLA breached – no call logged within 15 minutes of assignment.</div>' : ''}
       ${age !== null && age >= 25 && !closed && l.stage !== 'Nurture' ? `<div class="callout">This lead auto-reassigns on day 30 unless converted${['Payment Pending', 'Demo Scheduled'].includes(l.stage) ? ' (currently exempt)' : ''}.</div>` : ''}
       <div class="record"><div>
@@ -525,7 +697,9 @@
     `<li><span class="${key === 'kyc' ? (ck.kyc ? 'ok' : 'no') : 'muted'}">${key === 'kyc' ? (ck.kyc ? 'Done' : 'Missing') : 'At convert'}</span> ${label}</li>`).join('')}</ul>
           <p class="small muted">Converting creates the student record, invoice, a 24-hour “assign teacher” task for Admin, Day 7 and Day 30 check-ins and a welcome WhatsApp. You stay on as retention owner.</p>
           ${editable && !closed ? '<button class="primary" id="a-conv2">Convert to student</button>' : ''}</div>
-        <div data-pane="4" class="panel flush" hidden>${taskTable(x.tasks)}</div>
+        <div data-pane="4" hidden><div class="panel flush" style="margin-bottom:16px">${taskTable(x.tasks)}</div>
+          <div class="panel flush"><div style="padding:14px 16px 0"><h2>Follow-up history</h2></div>${x.followUps.length ? `<table><thead><tr><th>Due</th><th>Type</th><th>Status</th><th>Done</th></tr></thead><tbody>
+            ${x.followUps.map((f) => `<tr><td>${dt(f.due_at)}</td><td>${esc(f.type || '')}</td><td>${pill(f.status === 'Done' ? (f.on_time ? 'On time' : 'Late') : f.status)}</td><td>${dt(f.done_at)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No follow-ups yet.</div>'}</div></div>
       </div>
       <div><div class="panel"><div class="panel-head"><h2>Timeline</h2></div>
         ${editable ? '<form id="note-f" style="margin-bottom:10px"><textarea name="text" placeholder="Add a note" style="min-height:50px"></textarea><button style="margin-top:6px">Add note</button></form>' : ''}
@@ -549,6 +723,19 @@
     on('#a-re', () => modal({ title: 'Reassign lead', body: field('New owner', select('owner_id', salesUsers().filter(([uid]) => uid !== l.owner_id), '', 'Choose rep', 'required')) + field('Reason', input('reason', 'Manager reassignment')),
       onSubmit: async (f) => { await post(`/leads/${l.id}/reassign`, f); toast('Lead reassigned'); reload(); } }));
     on('#a-edit', () => editLeadModal(l));
+    on('#a-int', () => interactionModal(l));
+    on('#a-ex', () => modal({ title: 'Exempt from 30-day reassignment', submit: 'Exempt',
+      body: `${field('Days', input('days', '7', 'number', 'min="1" max="60"'))}${field('Reason *', input('reason', '', 'text', 'required placeholder="e.g. parent travelling, decision after exams"'))}`,
+      onSubmit: async (f) => { await post(`/leads/${l.id}/exempt`, f); toast('Exemption saved'); reload(); } }));
+    on('#a-arch', () => modal({ title: 'Archive lead', submit: 'Archive', body: `<p class="small muted">Nothing is deleted. The lead leaves every list but its full history stays on record.</p>${field('Reason *', input('reason', '', 'text', 'required'))}`,
+      onSubmit: async (f) => { await post(`/leads/${l.id}/archive`, f); toast('Lead archived'); location.hash = '#/leads'; } }));
+    on('#a-restore', async () => { await post(`/leads/${l.id}/restore`); toast('Lead restored'); reload(); });
+    on('#a-merge', () => modal({ title: `Merge ${l.code} into another lead`, submit: 'Merge',
+      body: `<p class="small muted">All calls, notes, tasks and follow-ups move to the lead you keep. This lead is archived and points to it.</p>
+        ${x.duplicates.filter((dd) => !dd.archived).length ? field('Keep this lead', select('into_id', x.duplicates.filter((dd) => !dd.archived).map((dd) => [dd.id, `${dd.code} – ${dd.parent_name} (${dd.stage})`]))) : field('Lead ID to keep (e.g. 12)', input('into_id', '', 'number', 'required'))}`,
+      onSubmit: async (f) => { const r = await post(`/leads/${l.id}/merge`, f); toast('Leads merged'); location.hash = `#/leads/${r.id}`; } }));
+    bindTimeline(x.activities, (aid) => callModal(l, aid));
+    const comp = qs().complete; if (comp && x.activities.some((a) => String(a.id) === comp && a.needs_note)) callModal(l, Number(comp));
     const nf = $('#notes-f'); if (nf) nf.onsubmit = async (e) => { e.preventDefault(); await api('PUT', `/leads/${l.id}/call-notes`, formData(nf)); toast('Call notes saved'); reload(); };
     const nt = $('#note-f'); if (nt) nt.onsubmit = async (e) => { e.preventDefault(); const f = formData(nt); if (!f.text) return; await post(`/leads/${l.id}/note`, f); reload(); };
     bindKyc(l, k);
@@ -568,35 +755,71 @@
     });
   }
 
-  function callModal(l) {
+  // Objection tags + sentiment + direction (blueprint 5.2), shared by every interaction form.
+  const convoFields = () => `<div class="grid2">${field('Direction', select('direction', [['outbound', 'Outbound'], ['inbound', 'Inbound']], 'outbound'))}
+      ${field('Parent sentiment', select('sentiment', S.meta.sentiments, 'Neutral', '—'))}</div>
+    <label>Objections</label><div class="chips-pick">${S.meta.objections.map((o) => `<label class="check"><input type="checkbox" data-multi="1" name="objections" value="${esc(o)}"> ${esc(o)}</label>`).join('')}</div>`;
+
+  function callModal(l, trackedId) {
+    const tracked = trackedId ? true : false;
     modal({
-      title: `Log call – ${l.parent_name}`, submit: 'Log call',
-      body: `${field('Outcome *', select('outcome', S.meta.callOutcomes, '', 'Choose outcome', 'required id="oc"'))}
+      title: tracked ? `Add notes – tracked call with ${l.parent_name}` : `Log call – ${l.parent_name}`, submit: tracked ? 'Save notes' : 'Log call',
+      body: `${tracked ? '<div class="callout green">The phone tracker already recorded this call\'s time and duration. Add what happened.</div>' : ''}
+        ${field('Outcome *', select('outcome', tracked ? S.meta.callOutcomes.filter((o) => o.startsWith('Connected')) : S.meta.callOutcomes, '', 'Choose outcome', 'required id="oc"'))}
         <div id="oc-interested" hidden>${field('Move to', select('stage', ['Contacted', 'Qualified'], l.stage === 'Qualified' ? 'Qualified' : 'Contacted'))}</div>
-        <div id="oc-fu" hidden>${followUpFields(inHours(24))}</div>
         <div id="oc-lost" hidden><div class="grid2">${field('Move to', select('move_to', ['Lost', 'Nurture'], 'Lost'))}${field('Lost reason', select('lost_reason', S.meta.lostReasons, '', 'Choose reason'))}</div>
           <div class="small muted" style="margin-top:-6px;margin-bottom:10px">For Nurture, set the revisit date below.</div></div>
         <div id="oc-auto" class="callout" hidden></div>
-        <div class="grid2">${field('Duration (min)', input('duration_min', '', 'number', 'min="0"'))}<div></div></div>
-        ${field('Notes', '<textarea name="notes"></textarea>')}`,
+        <div id="oc-conn" hidden>
+          ${field('What was said *', `<textarea name="notes" id="oc-notes" placeholder="At least 2 lines: what the parent said, the child's problem, what you agreed"></textarea>`)}
+          <div class="small muted" id="oc-count" style="margin:-8px 0 10px"></div>
+          ${convoFields()}
+          ${field('Next step', input('next_step', '', 'text', 'placeholder="e.g. Send demo slots on WhatsApp, call Thursday 6pm"'))}
+        </div>
+        <div id="oc-fu" hidden>${followUpFields(inHours(24))}</div>
+        <div class="grid2" id="oc-dur">${tracked ? '' : field('Duration (min)', input('duration_min', '', 'number', 'min="0"'))}<div></div></div>`,
       onOpen: (form) => {
         const oc = $('#oc', form);
+        const notes = $('#oc-notes', form);
+        const count = () => {
+          const lines = notes.value.split('\n').filter((x) => x.trim()).length;
+          $('#oc-count', form).textContent = lines >= 2 || notes.value.trim().length >= S.meta.minNoteChars ? 'Looks complete' : `${lines} of 2 lines · ${notes.value.trim().length}/${S.meta.minNoteChars} characters`;
+        };
+        notes.oninput = count; count();
         oc.onchange = () => {
           const v = oc.value;
+          const connected = v.startsWith('Connected');
           $('#oc-interested', form).hidden = v !== 'Connected - Interested';
-          $('#oc-fu', form).hidden = !['Connected - Interested', 'Connected - Call back later'].includes(v) && !(v === 'Connected - Not interested');
+          $('#oc-fu', form).hidden = !connected;
+          $('#oc-conn', form).hidden = !connected;
           $('#oc-lost', form).hidden = v !== 'Connected - Not interested';
-          const auto = { 'Not answered': `Stage → Attempted, WhatsApp task created${l.attempt_count === 0 ? '' : ' if due'}, retry scheduled automatically.`, 'Busy / Switched off': 'Retry scheduled in 3 hours (same day).', 'Wrong number': 'Lead is flagged for manager review.' }[v];
+          const auto = { 'Not answered': `Stage → Attempted, WhatsApp task created${l.attempt_count === 0 ? '' : ' if due'}, retry scheduled automatically.`, Busy: 'Retry scheduled in 3 hours (same day).', 'Switched off': 'Retry scheduled in 3 hours (same day).', 'Wrong number': 'Lead is flagged for manager review.' }[v];
           $('#oc-auto', form).hidden = !auto; $('#oc-auto', form).textContent = `${auto || ''} Attempt ${l.attempt_count + 1} of 6.`;
-          $$('#oc-fu input, #oc-fu select, #oc-interested select, #oc-lost select', form).forEach((el) => { el.disabled = el.closest('[hidden]') !== null; });
+          $$('#oc-fu input, #oc-fu select, #oc-interested select, #oc-lost select, #oc-conn input, #oc-conn select, #oc-conn textarea', form).forEach((el) => { el.disabled = el.closest('[hidden]') !== null; });
         };
         oc.onchange();
       },
       onSubmit: async (f) => {
+        if (trackedId) f.activity_id = trackedId;
         const r = await post(`/leads/${l.id}/call`, f);
-        const pts = can('game.view') ? 1 + (String(f.outcome).startsWith('Connected') ? 2 : 0) : 0;
-        toast(`Call logged · ${r.stage}${pts ? ` · +${pts} pts` : ''}`); reload();
+        const pts = can('game.view') && !trackedId ? 1 + (String(f.outcome).startsWith('Connected') ? 2 : 0) : 0;
+        toast(`${trackedId ? 'Notes saved' : 'Call logged'} · ${r.stage}${pts ? ` · +${pts} pts` : ''}`);
+        location.hash = `#/leads/${l.id}`; reload();
       },
+    });
+  }
+
+  function interactionModal(l) {
+    modal({
+      title: `Log interaction – ${l.parent_name}`, submit: 'Log', wide: true,
+      body: `<div class="grid2">${field('Type', select('type', [['demo', 'Demo class'], ['email', 'Email'], ['walkin', 'Walk-in visit']], 'demo', undefined, 'id="it"'))}
+        <div id="it-demo">${field('Demo outcome', select('demo_outcome', ['Demo done', 'Demo no-show', 'Demo rescheduled'], 'Demo done'))}</div></div>
+        ${field('What happened *', '<textarea name="summary" placeholder="At least 2 lines"></textarea>')}
+        ${convoFields()}
+        ${field('Next step *', input('next_step', '', 'text', 'required placeholder="e.g. Share package options, call after dinner"'))}
+        ${followUpFields(inHours(24))}`,
+      onOpen: (form) => { const it = $('#it', form); it.onchange = () => { $('#it-demo', form).hidden = it.value !== 'demo'; }; },
+      onSubmit: async (f) => { const r = await post(`/leads/${l.id}/interaction`, f); toast(`Logged · ${r.stage}`); reload(); },
     });
   }
 
@@ -606,6 +829,7 @@
       title: `Log WhatsApp – ${l.parent_name}`, submit: 'Log message',
       body: `${field('Template', select('template', templates, 'Intro + brochure'))}${field('Message / note', '<textarea name="message"></textarea>')}
         <label class="check"><input type="checkbox" name="replied"> Parent replied</label>
+        ${convoFields()}
         ${field('Screenshot / attachment link', input('attachment', '', 'url', 'placeholder="https://…"'))}
         <label class="check"><input type="checkbox" id="wa-fu-t"> Also set the next follow-up</label><div id="wa-fu" hidden>${followUpFields(inHours(24), 'call')}</div>`,
       onOpen: (form) => { const t = $('#wa-fu-t', form); const sync = () => { $('#wa-fu', form).hidden = !t.checked; $$('#wa-fu input, #wa-fu select', form).forEach((el) => { el.disabled = !t.checked; }); }; t.onchange = sync; sync(); },
@@ -747,7 +971,11 @@
     ]);
     BADGE_INFO = rules;
     const badgeName = Object.fromEntries(rules.badges.map((x) => [x.id, x.name]));
-    const rows = b.rows;
+    const by = p.by === 'revenue' ? 'revenue' : 'points';
+    // Blueprint 15: reps ranked by revenue with deals and average deal; points view rewards the whole process.
+    const rows = by === 'revenue'
+      ? [...b.rows].sort((x, y) => y.revenueAED - x.revenueAED || y.conversions - x.conversions).map((r, i) => ({ ...r, rank: i + 1, movement: 0, prevRank: null, points: r.revenueAED }))
+      : b.rows;
     const podium = [rows[1], rows[0], rows[2]].filter(Boolean);
     const periodLabel = { today: 'today', week: 'this week', month: 'this month' }[period];
     const qsFor = (o) => `#/leaderboard?${new URLSearchParams({ period, ...(market && { market }), ...o })}`;
@@ -769,17 +997,19 @@
         ${progress(goal.revenueAED, goal.revenueGoalAED, `Revenue <span class="num">AED ${goal.revenueAED.toLocaleString()} / ${goal.revenueGoalAED.toLocaleString()}</span>`, goal.monthPct)}</div>
       </section>
 
-      <nav class="views">${[['today', 'Today'], ['week', 'This week'], ['month', 'This month']].map(([v, l]) => `<a href="${qsFor({ period: v })}" class="${v === period ? 'on' : ''}">${l}</a>`).join('')}
+      <nav class="views">${[['points', 'Points'], ['revenue', 'Revenue']].map(([v, l]) => `<a href="${qsFor({ by: v })}" class="${v === by ? 'on' : ''}">${l}</a>`).join('')}<span style="flex:0 0 18px"></span>
+        ${[['today', 'Today'], ['week', 'This week'], ['month', 'This month']].map(([v, l]) => `<a href="${qsFor({ period: v, by })}" class="${v === period ? 'on' : ''}">${l}</a>`).join('')}
         <span style="flex:1"></span>${[['', 'All'], ['UAE', 'UAE'], ['India', 'India']].map(([v, l]) => `<a href="#/leaderboard?${new URLSearchParams({ period, ...(v && { market: v }) })}" class="${v === market ? 'on' : ''}">${l}</a>`).join('')}</nav>
 
       ${rows.length ? `<div class="podium" aria-label="Top three">${podium.map((r) => `<div class="pod pod-${r.rank} ${r.user_id === S.me.id ? 'me' : ''}">
-          ${avatar(r.name, 'lg')}<div class="pod-name">${esc(shortName(r.name))}</div><div class="pod-pts num">${r.points} pts</div>
+          ${avatar(r.name, 'lg')}<div class="pod-name">${esc(shortName(r.name))}</div><div class="pod-pts num">${by === 'revenue' ? `AED ${r.points.toLocaleString()}` : `${r.points} pts`}</div>
           <div class="pod-step"><span class="num">${r.rank}</span></div></div>`).join('')}</div>` : ''}
       ${b.mostImproved ? `<div class="callout green">Most improved ${periodLabel}: <b>${esc(shortName(b.mostImproved.name))}</b>, up ${b.mostImproved.gain} pts on the previous period.</div>` : ''}
 
-      <div class="table-wrap"><table class="board-table"><thead><tr><th>Rep</th><th class="r">Points</th><th>Move</th><th class="r">Students</th><th class="r">Revenue (AED)</th><th class="r">Calls</th><th class="r">Connect</th><th class="r">Streak</th><th>Badges</th></tr></thead><tbody>
+      <div class="table-wrap"><table class="board-table"><thead><tr><th>Rep</th><th class="r">${by === 'revenue' ? 'Revenue (AED)' : 'Points'}</th><th>Move</th><th class="r">Deals</th><th class="r">${by === 'revenue' ? 'Avg deal (AED)' : 'Revenue (AED)'}</th><th class="r">Calls</th><th class="r">Connect</th><th class="r">Streak</th><th>Badges</th></tr></thead><tbody>
         ${rows.map((r) => `<tr class="${r.user_id === S.me.id ? 'me' : ''}"><td><span class="rk num">${r.rank}</span>${avatar(r.name, 'sm')}<b>${esc(shortName(r.name))}</b>${r.user_id === S.me.id ? ' <span class="pill green">You</span>' : ''}<div class="small muted">${esc(r.market || 'Manager')}</div></td>
-          <td class="r num"><b>${r.points}</b></td><td>${move(r.movement, r.prevRank !== null)}</td><td class="r num">${r.conversions + r.renewals}</td><td class="r num">${r.revenueAED.toLocaleString()}</td>
+          <td class="r num"><b>${r.points.toLocaleString()}</b></td><td>${move(r.movement, r.prevRank !== null)}</td><td class="r num">${r.conversions + r.renewals}</td>
+          <td class="r num">${by === 'revenue' ? ((r.conversions + r.renewals) ? Math.round(r.revenueAED / (r.conversions + r.renewals)).toLocaleString() : '—') : r.revenueAED.toLocaleString()}</td>
           <td class="r num">${r.calls}</td><td class="r num">${r.connectRate === null ? '—' : `${r.connectRate}%`}</td><td class="r num">${r.streak ? `${r.streak}d` : '—'}</td>
           <td>${r.badges.map((x) => `<span class="badge-chip">${esc(badgeName[x] || x)}</span>`).join(' ') || '<span class="muted">—</span>'}</td></tr>`).join('')}
       </tbody></table></div>
@@ -834,6 +1064,157 @@
     } catch { /* not on the board */ }
   }
 
+  // ---------------- scorecards (blueprint 16.2) ----------------
+  const fmtMetric = (m) => (m.value === null ? '—' : m.unit === '%' ? `${m.value}%` : m.unit === 'AED' ? `AED ${Number(m.value).toLocaleString()}` : m.value);
+  const scoreTiles = (metrics) => `<div class="score-grid">${metrics.map((m) => `<div class="score ${m.ok === false ? 'bad' : m.ok ? 'good' : ''}">
+    <div class="v">${esc(fmtMetric(m))}</div><div>${esc(m.label)}</div>${m.target !== null ? `<div class="t">Target ${m.unit === '%' ? `${m.target}%` : m.higherIsBetter === false || m.target === 0 ? (m.target === 0 ? '0' : `≤ ${m.target}`) : m.target}</div>` : ''}</div>`).join('')}</div>`;
+
+  async function pageScorecard() {
+    const p = qs();
+    const period = p.period || 'week';
+    const mine = await get(`/scorecard?period=${period}${p.user ? `&user=${p.user}` : ''}`);
+    const team = can('audit.view') && !p.user ? await get(`/scorecards/team?period=${period}`) : [];
+    const below = mine.metrics.filter((m) => m.ok === false);
+    setPage(`<div class="page-head"><div><h1>${p.user ? esc(mine.user.name) : 'My scorecard'}</h1><div class="muted">${esc(S.meta.roles[mine.user.role])} · ${d(mine.from)} – ${d(new Date(new Date(mine.to) - 1).toISOString())}</div></div></div>
+      <nav class="views">${[['today', 'Today'], ['week', 'This week'], ['month', 'This month']].map(([v, l]) => `<a href="#/scorecard?${new URLSearchParams({ period: v, ...(p.user && { user: p.user }) })}" class="${v === period ? 'on' : ''}">${l}</a>`).join('')}</nav>
+      ${below.length ? `<div class="callout red">Below target: ${below.map((m) => esc(m.label)).join(', ')}. Two weeks below target on notes or on-time follow-ups starts a coaching session.</div>` : mine.metrics.some((m) => m.ok) ? '<div class="callout green">On target for this period.</div>' : ''}
+      ${scoreTiles(mine.metrics)}
+      ${team.length ? `<h2 style="margin-top:24px">Team scorecards</h2><div class="table-wrap"><table><thead><tr><th>Person</th><th>Role</th><th>Below target</th><th>Key numbers</th></tr></thead><tbody>
+        ${team.map((c) => `<tr class="click" data-href="#/scorecard?period=${period}&user=${c.user.id}"><td><a href="#/scorecard?period=${period}&user=${c.user.id}"><b>${esc(c.user.name)}</b></a></td><td>${esc(S.meta.roles[c.user.role])}</td>
+          <td>${c.metrics.filter((m) => m.ok === false).map((m) => pill(m.label).replace('pill ', 'pill red ')).join(' ') || '<span class="pill green">All on target</span>'}</td>
+          <td class="small">${c.metrics.slice(0, 4).map((m) => `${esc(m.label)}: <b>${esc(fmtMetric(m))}</b>`).join(' · ')}</td></tr>`).join('')}</tbody></table></div>` : ''}`);
+    $$('tr.click').forEach((tr) => tr.addEventListener('click', (e) => { if (e.target.tagName !== 'A') location.hash = tr.dataset.href; }));
+  }
+
+  // ---------------- weekly review (blueprint 16.7) ----------------
+  async function pageReview() {
+    const p = qs();
+    const tab = p.tab || 'review';
+    const head = `<div class="page-head"><div><h1>Weekly review</h1><div class="muted">30 minutes, CRM data only – leave with action items that have owners and dates</div></div>
+      <div class="actions"><button class="primary" id="new-action">Add action item</button></div></div>
+      <nav class="views">${[['review', 'Review'], ['edits', 'Note edits to approve'], ['audit', 'Audit log']].map(([v, l]) => `<a href="#/review?tab=${v}" class="${v === tab ? 'on' : ''}">${l}</a>`).join('')}</nav>`;
+    if (tab === 'edits') {
+      const rows = await get('/edit-requests');
+      setPage(`${head}<div class="table-wrap">${rows.length ? `<table><thead><tr><th>Requested</th><th>By</th><th>Original</th><th>Change to</th><th>Reason</th><th></th></tr></thead><tbody>
+        ${rows.map((r) => `<tr><td>${dt(r.created_at)}<div class="small"><a href="#/${r.entity === 'lead' ? 'leads' : 'students'}/${r.entity_id}">Open record</a></div></td><td>${esc(r.requested_by_name)}</td>
+          <td class="small" style="white-space:pre-wrap">${esc(r.old_body)}</td><td class="small" style="white-space:pre-wrap">${esc(r.new_body)}</td><td>${esc(r.reason)}</td>
+          <td class="r" style="white-space:nowrap"><button class="small primary" data-er="${r.id}" data-d="approve">Approve</button> <button class="small danger" data-er="${r.id}" data-d="reject">Reject</button></td></tr>`).join('')}</tbody></table>` : '<div class="empty">No edits waiting. Staff can edit their own notes for 24 hours; later changes come here.</div>'}</div>`);
+      $$('[data-er]').forEach((b) => { b.onclick = async () => { await post(`/edit-requests/${b.dataset.er}/${b.dataset.d}`); toast(b.dataset.d === 'approve' ? 'Edit approved – old version kept' : 'Edit rejected'); reload(); }; });
+    } else if (tab === 'audit') {
+      const rows = await get(`/audit?${new URLSearchParams(Object.fromEntries(Object.entries(p).filter(([k, v]) => v && k !== 'tab')))}`);
+      setPage(`${head}<form class="filters" id="af"><input type="hidden" name="tab" value="audit">
+        ${select('entity', ['leads', 'students', 'payments', 'payouts', 'teachers', 'users', 'kyc', 'classes', 'activities', 'settings', 'packages'], p.entity, 'Any record type')}
+        ${select('user_id', S.meta.users.map((u) => [u.id, u.name]), p.user_id, 'Anyone')}${select('action', ['create', 'update', 'archive', 'merge', 'import', 'export', 'login', 'edit_approved', 'edit_rejected', '2fa_enabled', '2fa_reset'], p.action, 'Any action')}
+        <input type="date" name="from" value="${esc(p.from || '')}"><input type="date" name="to" value="${esc(p.to || '')}"><button>Filter</button></form>
+        <p class="small muted">Every change records who, what, when and old → new values. Nothing is hard-deleted. Only managers and the Owner can see this.</p>
+        <div class="table-wrap">${rows.length ? `<table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Record</th><th>Changes</th></tr></thead><tbody>
+        ${rows.map((a) => `<tr><td class="small">${dt(a.created_at)}</td><td>${esc(a.user_name || 'System')}</td><td>${esc(a.action)}</td>
+          <td>${esc(a.entity)}${a.entity_id ? ` #${a.entity_id}` : ''}</td>
+          <td class="small">${a.changes ? Object.entries(a.changes).slice(0, 6).map(([k, [o, n]]) => `<b>${esc(k)}</b>: ${esc(String(o ?? '—').slice(0, 40))} → ${esc(String(n ?? '—').slice(0, 40))}`).join('<br>') : esc(a.note || '')}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No matching entries.</div>'}</div>`);
+      $('#af').onsubmit = (e) => { e.preventDefault(); location.hash = `#/review?${new URLSearchParams(Object.entries(formData(e.target)).filter(([, v]) => v))}`; };
+    } else {
+      const r = await get('/review');
+      const list = (rows, fn, empty) => (rows.length ? `<ul class="plain">${rows.map(fn).join('')}</ul>` : `<div class="muted small">${empty}</div>`);
+      setPage(`${head}
+        <div class="kpis">${kpi(r.pipeline.newThisWeek, 'New leads this week')}${kpi(r.pipeline.convertedThisWeek, 'Converted this week')}${kpi(r.overdue.length, 'Overdue follow-ups', r.overdue.length > 0)}
+          ${kpi(r.escalationsOpen.length, 'Open escalations', r.escalationsOpen.length > 0)}${kpi(r.renewals.due, 'Students due for renewal')}${kpi(r.renewals.doneLastWeek, 'Renewals last week')}
+          ${kpi(r.mismatches.length, 'Payout mismatches', r.mismatches.length > 0)}${kpi(r.tickets.length, 'Open teacher/student issues', r.tickets.length > 0)}</div>
+        <div class="dash-grid">
+          <section class="panel"><h2>Compliance below target</h2>${list(r.compliance, (c) => `<li><a href="#/scorecard?user=${c.user.id}"><b>${esc(c.user.name)}</b></a> – ${c.below.map((m) => `${esc(m.label)} ${esc(fmtMetric(m))}`).join(', ')}</li>`, 'Everyone is on target this week.')}</section>
+          <section class="panel"><h2>Coaching</h2>${list(r.coaching, (c) => `<li><b>${esc(c.user_name)}</b> ${pill(c.status)} <span class="small muted">${esc(c.reason)}</span>${c.status === 'Due' ? ` <button class="small" data-coach="${c.id}">Log session</button>` : `<div class="small muted">${esc(c.notes || '')}</div>`}</li>`, 'No coaching due.')}</section>
+          <section class="panel"><h2>Formal review triggers</h2>${list(r.triggers, (t) => `<li><b>${esc(t.user.name)}</b>: ${t.reasons.map(esc).join('; ')}</li>`, 'No repeated breaches in the last two weeks.')}
+            <p class="small muted">Apply the consequences agreed in writing with staff.</p></section>
+          <section class="panel"><h2>Escalated (overdue 48h)</h2>${list(r.escalationsOpen, (e) => `<li><a href="#/leads/${e.entity_id}">${esc(e.parent_name || e.code)}</a> – ${esc(e.owner_name || '')} <span class="small muted">${ago(e.created_at)}</span> <button class="small" data-esc="${e.id}">Resolve</button></li>`, 'Nothing escalated.')}</section>
+          <section class="panel"><h2>Lost reasons (last week)</h2>${barList(Object.fromEntries(r.lost.map((x) => [x.lost_reason || '—', x.n])))}</section>
+          <section class="panel"><h2>Teacher / student issues</h2>${list(r.tickets, (t) => `<li>${esc(t.title)} <span class="small muted">due ${dt(t.due_at)}</span></li>`, 'No open tickets.')}</section>
+          <section class="panel"><h2>Payout accuracy</h2>${list(r.mismatches, (m) => `<li>${esc(m.name)}: attendance ${m.attendance_hours} h vs payout ${m.payout_hours} h</li>`, 'Payout hours match attendance.')}</section>
+          <section class="panel"><h2>Pipeline now</h2>${barList(Object.fromEntries(Object.entries(r.pipeline.byStage).filter(([k]) => !['Converted', 'Lost'].includes(k))))}</section>
+        </div>
+        <h2 style="margin-top:22px">Overdue list</h2><div class="table-wrap">${r.overdue.length ? `<table><thead><tr><th>Lead</th><th>Owner</th><th>Due</th><th>Type</th></tr></thead><tbody>${r.overdue.map((o) => `<tr><td><a href="#/leads/${o.id}">${esc(o.parent_name)}</a> <span class="small muted">${esc(o.code)}</span>${o.escalated ? ' ' + pill('Escalated').replace('pill ', 'pill red ') : ''}</td><td>${esc(o.owner_name || '—')}</td><td>${dueCell(o.next_follow_up_at)}</td><td>${esc(o.next_follow_up_type || '')}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">Nothing overdue.</div>'}</div>
+        <h2 style="margin-top:22px">Action items</h2><div class="table-wrap">${taskTable(r.actions, true)}</div>`);
+      bindTaskTable();
+      $$('[data-coach]').forEach((b) => { b.onclick = () => modal({ title: 'Log coaching session', submit: 'Save', body: field('What was discussed and agreed *', '<textarea name="notes" required></textarea>'),
+        onSubmit: async (f) => { await post(`/coaching/${b.dataset.coach}/held`, f); toast('Coaching session logged'); reload(); } }); });
+      $$('[data-esc]').forEach((b) => { b.onclick = () => modal({ title: 'Resolve escalation', submit: 'Resolve', body: field('What was done', input('note', '', 'text', 'placeholder="Took over / reassigned / called the parent"')),
+        onSubmit: async (f) => { await post(`/escalations/${b.dataset.esc}/resolve`, f); toast('Escalation resolved'); reload(); } }); });
+    }
+    $('#new-action').onclick = () => modal({ title: 'Add action item', submit: 'Add',
+      body: `${field('Action *', input('title', '', 'text', 'required'))}<div class="grid2">${field('Owner', select('assignee_id', users().map((u) => [u.id, u.name]), S.me.id))}${field('Due', `<input type="datetime-local" name="due_at" value="${inHours(72)}">`)}</div>`,
+      onSubmit: async (f) => { await post('/tasks', { ...f, type: 'review' }); toast('Action item added'); reload(); } });
+  }
+
+  // ---------------- phone tracker (blueprint 6) ----------------
+  async function pagePhone() {
+    const all = can('leads.reassign');
+    const [mine, everyone] = await Promise.all([get('/devices'), all ? get('/devices?all=1') : Promise.resolve([])]);
+    const devTable = (rows, showUser) => (rows.length ? `<table><thead><tr>${showUser ? '<th>Rep</th>' : ''}<th>Phone</th><th>Status</th><th>Last sync</th><th class="r">Calls sent</th><th></th></tr></thead><tbody>
+      ${rows.map((d) => `<tr>${showUser ? `<td>${esc(d.user_name)}</td>` : ''}<td>${esc(d.name || 'Phone')}</td><td>${d.revoked ? pill('Revoked') : d.pending ? pill('Waiting for pairing') : '<span class="pill green">Paired</span>'}</td>
+        <td>${d.last_seen ? ago(d.last_seen) : '—'}</td><td class="r num">${d.events}</td><td class="r">${!d.revoked && !d.pending ? `<button class="small danger" data-rv="${d.id}">Revoke</button>` : ''}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No phones paired yet.</div>');
+    setPage(`<div class="page-head"><div><h1>Phone tracker</h1><div class="muted">Dials and talk time measured from the company phone, not typed in</div></div>
+      <div class="actions"><button class="primary" id="pair">Create pairing code</button></div></div>
+      <div class="panel"><h2>How it works</h2><ol class="small" style="padding-left:18px;line-height:1.8;margin:0">
+        <li>Install the Jeta Call Tracker app on your <b>company Android phone</b> (your admin sends the APK).</li>
+        <li>Tap <b>Create pairing code</b> here and type the 6-digit code into the app within 10 minutes.</li>
+        <li>Calls with CRM parents are matched automatically. Personal calls never leave the phone.</li>
+        <li>After a connected call you get an alert: open the lead and <b>Add notes</b> within 10 minutes.</li></ol>
+        <p class="small muted" style="margin-bottom:0">iPhones can't share the call log. Use a cloud telephony provider instead – it sends calls to the CRM the same way.</p></div>
+      <h2>My phones</h2><div class="table-wrap" style="margin-bottom:20px">${devTable(mine, false)}</div>
+      ${all ? `<h2>All team phones</h2><div class="table-wrap">${devTable(everyone, true)}</div>` : ''}`);
+    $('#pair').onclick = async () => {
+      const r = await post('/devices/pairing', { name: 'Company phone' });
+      modal({ title: 'Pair your phone', body: `<p>Open the Jeta Call Tracker app and enter:</p><div class="pair-code">${esc(r.code)}</div>
+        <p class="small muted">CRM address: <b>${esc(location.origin)}</b><br>The code expires at ${new Date(r.expires_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}.</p>` });
+    };
+    $$('[data-rv]').forEach((b) => { b.onclick = async () => { if (!confirm('Revoke this phone? It stops sending calls immediately.')) return; await post(`/devices/${b.dataset.rv}/revoke`); toast('Phone revoked'); reload(); }; });
+  }
+
+  // ---------------- settings (Owner) ----------------
+  async function pageSettings() {
+    const st = await get('/settings');
+    const c = st.company; const T = st.compliance;
+    setPage(`<div class="page-head"><div><h1>Settings</h1><div class="muted">Changes are recorded in the audit log</div></div></div>
+      <div class="dash-grid">
+      <form class="panel" data-key="company"><h2>Company &amp; invoices</h2>
+        ${field('Brand name', input('name', c.name))}${field('Legal name', input('legal_name', c.legal_name))}
+        ${field('Address', `<textarea name="address">${esc(c.address)}</textarea>`)}
+        <div class="grid2">${field('TRN (VAT number)', input('trn', c.trn))}${field('Invoice prefix', input('invoice_prefix', c.invoice_prefix))}</div>
+        <div class="grid2">${field('Phone', input('phone', c.phone))}${field('Email', input('email', c.email, 'email'))}</div>
+        ${field('Website', input('website', c.website))}${field('Logo URL', input('logo_url', c.logo_url))}
+        <label class="check"><input type="checkbox" name="vat_enabled" ${c.vat_enabled ? 'checked' : ''}> Charge VAT (prices include VAT)</label>
+        ${field('VAT rate %', input('vat_rate', c.vat_rate, 'number', 'min="0" max="30" step="0.5"'))}
+        ${field('Invoice footer', `<textarea name="footer">${esc(c.footer)}</textarea>`)}
+        <p class="small muted">Invoices are numbered ${esc(c.invoice_prefix)}-${new Date().getFullYear()}-0001 and restart each year.</p><button class="primary">Save company details</button></form>
+      <div>
+        <form class="panel" data-key="assignment"><h2>Lead assignment</h2>
+          ${field('New leads go to', select('mode', [['round_robin', 'Round-robin within the market'], ['least_open', 'Rep with the fewest open leads']], st.assignment.mode))}<button class="primary">Save</button></form>
+        <form class="panel" data-key="escalation"><h2>Escalation at +48 hours</h2>
+          ${field('When a follow-up is 48 hours overdue', select('hours48Action', [['flag', 'Flag red – manager takes over'], ['reassign', 'Reassign to the next rep automatically']], st.escalation.hours48Action))}<button class="primary">Save</button></form>
+        <form class="panel" data-key="payouts"><h2>Teacher payouts</h2>
+          ${field('Payout cycle', select('cycle', [['monthly', 'Monthly'], ['fortnightly', 'Fortnightly (1–15, 16–end)']], st.payouts.cycle))}<button class="primary">Save</button></form>
+        <form class="panel" data-key="security"><h2>Security</h2>
+          ${field('Two-step sign-in for Owner, Admin and Accounts', select('require2fa', [['', 'Automatic (on for real servers, off for demo data)'], ['true', 'Always on'], ['false', 'Off']], st.security.require2fa === null ? '' : String(st.security.require2fa)))}
+          <button class="primary">Save</button></form>
+      </div>
+      <form class="panel" data-key="compliance"><h2>Scorecard targets</h2>
+        <div class="grid2">${field('Notes completed %', input('notesPct', T.notesPct, 'number'))}${field('Follow-ups on time %', input('onTimeFollowUpPct', T.onTimeFollowUpPct, 'number'))}</div>
+        <div class="grid2">${field('First-call SLA %', input('firstCallSlaPct', T.firstCallSlaPct, 'number'))}${field('Teacher assigned in 24h %', input('teacherAssign24hPct', T.teacherAssign24hPct, 'number'))}</div>
+        <div class="grid2">${field('Exceptions cleared in 24h %', input('exceptionsCleared24hPct', T.exceptionsCleared24hPct, 'number'))}${field('KYC verified in 24h %', input('kycVerified24hPct', T.kycVerified24hPct, 'number'))}</div>
+        <div class="grid2">${field('Invoices in 24h %', input('invoices24hPct', T.invoices24hPct, 'number'))}${field('Payouts on time %', input('payoutsOnTimePct', T.payoutsOnTimePct, 'number'))}</div>
+        ${field('Payouts due (days after period end)', input('payoutDueDays', T.payoutDueDays, 'number'))}
+        <p class="small muted">Agree targets and consequences with staff in writing before launch. Two weeks below the notes or on-time target starts a coaching session.</p><button class="primary">Save targets</button></form>
+      <div class="panel"><h2>Integrations</h2><dl class="fields">
+        <dt>Google Workspace</dt><dd>${S.meta.google ? '<span class="pill green">Connected</span> Meet links and attendance are automatic' : '<span class="pill">Not set up</span> Admin pastes Meet links; attendance via teacher form + Meet CSV import'}</dd>
+        <dt>WhatsApp / email</dt><dd>Configured on the server (see DEPLOY.md)</dd>
+        <dt>Phone tracker</dt><dd><a href="#/phone">Manage phones</a></dd></dl></div>
+      </div>`);
+    $$('form[data-key]').forEach((f) => { f.onsubmit = async (e) => {
+      e.preventDefault();
+      const body = formData(f);
+      if (f.dataset.key === 'security') body.require2fa = body.require2fa === '' || body.require2fa === undefined ? null : body.require2fa === 'true';
+      try { await api('PUT', `/settings/${f.dataset.key}`, body); S.settings = await get('/settings'); toast('Saved'); } catch (err) { toast(err.message, true); }
+    }; });
+  }
+
   // ---------------- tasks ----------------
   function taskTable(tasks, showLink = false) {
     if (!tasks.length) return '<div class="empty">No tasks.</div>';
@@ -872,16 +1253,17 @@
     const view = p.view || 'all';
     const rows = await get(`/students?${new URLSearchParams(p)}`);
     setPage(`<div class="page-head"><div><h1>Students</h1><div class="muted">${rows.length} shown${role() === 'sales_exec' ? ' · students you own for retention' : ''}</div></div>
-      ${can('dashboard.team') ? '<div class="actions"><button id="exp">Export CSV</button></div>' : ''}</div>
+      ${can('exports') ? '<div class="actions"><button id="exp">Export CSV</button></div>' : ''}</div>
       <nav class="views">${[['all', 'All'], ['unassigned', 'Awaiting teacher'], ['renewal', 'Due for renewal']].map(([v, l]) => `<a href="#/students?view=${v}" class="${v === view ? 'on' : ''}">${l}</a>`).join('')}</nav>
       <form class="filters" id="sf"><input type="hidden" name="view" value="${esc(view)}"><input name="search" placeholder="Child, parent, ID" value="${esc(p.search || '')}">
         ${select('stage', S.meta.studentStages, p.stage, 'Any stage')}${select('retention', S.meta.retentionStages, p.retention, 'Any retention stage')}
         ${select('teacher', S.meta.teachers.map((t) => [t.id, t.name]), p.teacher, 'Any teacher')}${select('country', ['UAE', 'India'], p.country, 'Any market')}<button>Filter</button></form>
-      <div class="table-wrap">${rows.length ? `<table class="student-table"><thead><tr><th>Student</th><th>Subjects</th><th>Stage</th><th>Retention</th><th>Teacher</th><th>Hours</th><th>Retention owner</th></tr></thead><tbody>
+      <div class="table-wrap">${rows.length ? `<table class="student-table"><thead><tr><th>Student</th><th>Subjects</th><th>Stage</th><th>Retention</th><th>Teacher</th><th>Hours</th><th>Owners</th><th>Last action</th></tr></thead><tbody>
         ${rows.map((s) => `<tr class="click" data-href="#/students/${s.id}"><td><a href="#/students/${s.id}"><b>${esc(s.child_name)}</b></a><div class="small muted">${esc(s.code)} · ${esc(s.parent_name)}</div></td>
           <td>${esc(s.subjects || '')}<div class="small muted">${esc([s.grade && `Gr ${s.grade}`, s.board, s.country].filter(Boolean).join(' · '))}</div></td>
           <td>${pill(s.stage)}</td><td>${pill(s.retention_stage) || '<span class="muted">—</span>'}</td><td>${esc(s.teacher_name || '—')}${s.batch_name ? `<div class="small muted">${esc(s.batch_name)}</div>` : ''}</td>
-          <td>${miniMeter(s)}</td><td>${esc(s.retention_owner_name || '—')}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No students here yet. Students appear when a lead is converted.</div>'}</div>`);
+          <td>${miniMeter(s)}</td><td class="small">Admin: ${esc(s.admin_owner_name || '—')}<div>Retention: ${esc(s.retention_owner_name || '—')}</div></td>
+          <td class="small ${s.last_action_at && (Date.now() - new Date(s.last_action_at)) > 7 * 864e5 && !['Churned', 'Completed'].includes(s.stage) ? 'due-over' : ''}">${ago(s.last_action_at || s.joined_at)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No students here yet. Students appear when a lead is converted.</div>'}</div>`);
     $('#sf').onsubmit = (e) => { e.preventDefault(); location.hash = `#/students?${new URLSearchParams(Object.entries(formData(e.target)).filter(([, v]) => v))}`; };
     $('#exp') && ($('#exp').onclick = () => openDoc('/export/students.csv', 'students.csv'));
     $$('tr.click').forEach((tr) => tr.addEventListener('click', (e) => { if (e.target.tagName !== 'A') location.hash = tr.dataset.href; }));
@@ -940,7 +1322,9 @@
           ${s.lead_id ? `<a class="btn" href="#/leads/${s.lead_id}">Open lead</a>` : ''}</div></div>
         <div class="meta"><span>Teacher <b>${esc(x.teacher?.name || 'Not assigned')}</b>${s.batch_type ? ` · ${esc(s.batch_type)}${s.batch_name ? ` ${esc(s.batch_name)}` : ''}` : ''}</span>
           <span>Schedule <b>${s.schedule_days ? `${esc(s.schedule_days)} at ${esc(s.schedule_time)} (${esc(s.timezone)})` : '—'}</b></span>
-          <span>Subjects <b>${esc(s.subjects || '—')}</b></span><span>Retention owner <b>${esc(s.retention_owner_name || '—')}</b></span><span>Joined <b>${d(s.joined_at)}</b></span></div>
+          <span>Subjects <b>${esc(s.subjects || '—')}</b></span><span>Admin owner <b>${esc(s.admin_owner_name || '—')}</b></span><span>Retention owner <b>${esc(s.retention_owner_name || '—')}</b></span><span>Joined <b>${d(s.joined_at)}</b></span>
+          ${s.meet_link ? `<span>Class link <b><a href="${esc(s.meet_link)}" target="_blank" rel="noopener">Google Meet</a></b></span>` : ''}
+          <span><button class="link small" id="b-ics">Calendar file</button></span></div>
         ${meter(s)}
         ${!['Churned', 'Paused', 'Renewed'].includes(s.stage) ? `<div class="stages">${flow.map((st, i) => `<span class="${st === s.stage ? 'cur' : ci > i ? 'done' : ''}">${esc(st)}</span>`).join('')}</div>` : ''}</div>
       ${x.blockers.length && !['Active', 'Churned', 'Completed'].includes(s.stage) ? `<div class="callout">Cannot go Active yet: ${esc(x.blockers.join(', '))}.</div>` : ''}
@@ -981,10 +1365,12 @@
         onSubmit: async (f) => { if (!f.teacher_id) throw new Error('Pick a teacher'); await post(`/students/${s.id}/assign-teacher`, f); toast('Teacher assigned'); reload(); },
       });
     });
+    on('#b-ics', () => openDoc(`/students/${s.id}/schedule.ics`, `schedule-${s.code}.ics`));
     on('#b-sched', () => modal({
       title: 'Schedule classes', submit: 'Create classes',
       body: `<label>Days</label><div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((dd) => `<label class="check"><input type="checkbox" data-multi="1" name="days" value="${dd}" ${(s.schedule_days || '').includes(dd.toLowerCase()) ? 'checked' : ''}> ${dd}</label>`).join('')}</div>
         <div class="grid3">${field('Time', input('time', s.schedule_time || '17:00', 'time'))}${field('Time zone', select('timezone', [['Asia/Dubai', 'UAE (GST)'], ['Asia/Kolkata', 'India (IST)']], s.timezone))}${field('Hours per class', input('duration_hours', '1', 'number', 'min="0.5" step="0.5"'))}</div>
+        ${S.meta.google ? '<p class="small muted">A Jeta-owned Google Meet link is created automatically and the teacher is invited.</p>' : field('Jeta Google Meet link (created under the Jeta account)', input('meet_link', s.meet_link || '', 'url', 'placeholder="https://meet.google.com/abc-defg-hij"'))}
         <div class="grid2">${field('Starting', input('start_date', new Date().toISOString().slice(0, 10), 'date'))}${field('Weeks ahead', input('weeks', '4', 'number', 'min="1" max="12"'))}</div>
         <p class="small muted">Classes stop at the hours remaining. Slots that clash with the teacher's other classes are skipped. Parent and teacher get WhatsApp reminders 24h and 1h before.</p>`,
       onSubmit: async (f) => { const r = await post(`/students/${s.id}/schedule`, f); toast(`${r.created} classes created${r.clashes.length ? `, ${r.clashes.length} skipped (clash)` : ''}`); reload(); },
@@ -1017,7 +1403,8 @@
       } }));
     on('#b-edit', () => modal({ title: 'Edit student', body: `<div class="grid2">${field('Child name', input('child_name', s.child_name))}${field('Parent name', input('parent_name', s.parent_name))}</div>
       <div class="grid3">${field('Grade', input('grade', s.grade))}${field('Board', select('board', S.meta.boards, s.board, '—'))}${field('Subjects', input('subjects', s.subjects))}</div>
-      <div class="grid2">${field('Email', input('email', s.email))}${field('City', input('city', s.city))}</div>`,
+      <div class="grid2">${field('Email', input('email', s.email))}${field('City', input('city', s.city))}</div>
+      ${field('Jeta Google Meet link', input('meet_link', s.meet_link || '', 'url', 'placeholder="https://meet.google.com/…"'))}`,
     onSubmit: async (f) => { await api('PATCH', `/students/${s.id}`, f); toast('Saved'); reload(); } }));
     on('#b-pay', () => modal({ title: 'Record payment or instalment', submit: 'Save',
       body: `<div class="grid2">${field(`Amount (${s.currency})`, input('amount', '', 'number', 'required'))}${field('Instalment no.', input('instalment_no', '2', 'number'))}</div>
@@ -1066,13 +1453,38 @@
     const range = filter === 'week' ? { from: today, to: new Date(Date.now() + 6 * 864e5).toISOString().slice(0, 10) }
       : filter === 'past' ? { from: new Date(Date.now() - 14 * 864e5).toISOString().slice(0, 10), to: today } : {};
     const params = new URLSearchParams({ ...range, ...(filter === 'unmarked' && { filter: 'unmarked' }), ...(p.teacher && { teacher: p.teacher }) });
-    const rows = await get(`/classes?${params}`);
-    setPage(`<div class="page-head"><div><h1>Classes & attendance</h1><div class="muted">${rows.length} classes</div></div>${can('dashboard.team') ? '<div class="actions"><button id="exp">Export CSV</button></div>' : ''}</div>
-      <nav class="views">${[['week', 'Next 7 days'], ['past', 'Last 14 days'], ['unmarked', 'Unmarked']].map(([v, l]) => `<a href="#/classes?filter=${v}" class="${v === filter ? 'on' : ''}">${l}</a>`).join('')}</nav>
+    const rows = filter === 'review' ? await get('/classes/review') : await get(`/classes?${params}`);
+    const adminTools = can('attendance.edit') ? '<button id="meet-imp">Import Meet attendance</button>' : '';
+    setPage(`<div class="page-head"><div><h1>Classes & attendance</h1><div class="muted">${rows.length} ${filter === 'review' ? 'items need review' : 'classes'}</div></div><div class="actions">${adminTools}${can('exports') ? '<button id="exp">Export CSV</button>' : ''}</div></div>
+      <nav class="views">${[['review', 'Needs review'], ['week', 'Next 7 days'], ['past', 'Last 14 days'], ['unmarked', 'Unmarked']].map(([v, l]) => `<a href="#/classes?filter=${v}" class="${v === filter ? 'on' : ''}">${l}</a>`).join('')}</nav>
+      ${filter === 'review' ? `<p class="small muted">Attendance is marked from Google Meet (teacher + student at 80% of the slot) or the teacher's post-class form. Only exceptions land here: time mismatches over 10 minutes, absences, missing proof, random 10% audits, duplicates and classes unmarked for 48 hours.</p>
+        <div class="table-wrap">${rows.length ? `<table><thead><tr><th>Class</th><th>Teacher</th><th>Why it's here</th><th>Meet / form</th><th>Status</th><th></th></tr></thead><tbody>
+        ${rows.map((c) => `<tr><td>${dt(c.scheduled_at)}<div class="small"><a href="#/students/${c.student_id}">${esc(c.child_name)}</a> · ${esc(c.subject || '')}</div></td><td>${esc(c.teacher_name)}</td>
+          <td><span class="pill amber">${esc(c.review_flag)}</span></td>
+          <td class="small">${c.teacher_minutes !== null && c.teacher_minutes !== undefined ? `Meet: teacher ${Math.round(c.teacher_minutes)}m, student ${Math.round(c.student_minutes || 0)}m<br>` : ''}${c.teacher_confirmed_at ? `Form: ${Math.round((c.teacher_reported_hours || 0) * 60)} min${c.topic ? ` – ${esc(c.topic)}` : ''}<br>` : ''}${c.proof_link ? `<a href="${esc(c.proof_link)}" target="_blank" rel="noopener">Proof</a>` : ''}</td>
+          <td>${pill(c.status)}</td><td class="r"><button class="small primary" data-rev="${c.id}">Review</button></td></tr>`).join('')}</tbody></table>` : '<div class="empty">Nothing to review. Attendance is up to date.</div>'}</div>` : ''}
       <form class="filters" id="cf"><input type="hidden" name="filter" value="${esc(filter)}">${select('teacher', S.meta.teachers.map((t) => [t.id, t.name]), p.teacher, 'All teachers')}<button>Filter</button></form>
       ${filter === 'unmarked' && rows.length ? '<div class="callout red">These classes are past but not marked. Hours and teacher payouts stay wrong until attendance is recorded.</div>' : ''}
-      <div class="table-wrap">${classRows(rows, { mark: true })}</div>`);
-    bindAttendance(rows);
+      ${filter === 'review' ? '' : `<div class="table-wrap">${classRows(rows, { mark: true })}</div>`}`);
+    if (filter !== 'review') bindAttendance(rows);
+    $$('[data-rev]').forEach((b) => { b.onclick = () => {
+      const c = rows.find((x) => String(x.id) === b.dataset.rev);
+      modal({ title: `Review – ${c.child_name}, ${dt(c.scheduled_at)}`, submit: 'Save review',
+        body: `<div class="callout">${esc(c.review_flag)}</div>
+          ${field('Attendance status', select('status', S.meta.attendanceStatuses, c.status === 'Scheduled' ? '' : c.status, c.status === 'Scheduled' ? 'Keep unmarked' : 'Keep as is'))}
+          ${field('Note', input('remarks', '', 'text', 'placeholder="What you checked"'))}
+          <div class="grid2">${field('Reschedule to (if needed)', '<input type="datetime-local" name="reschedule_to">')}${field('Reschedule reason', input('reschedule_reason'))}</div>`,
+        onSubmit: async (f) => { if (!f.status) delete f.status; await post(`/classes/${c.id}/review`, f); toast('Reviewed'); reload(); } });
+    }; });
+    $('#meet-imp') && ($('#meet-imp').onclick = () => modal({ title: 'Import Google Meet attendance', submit: 'Import', wide: true,
+      body: `<p class="small muted">Use the Meet attendance report (CSV). Each row is one participant: <b>email</b> and <b>minutes</b> (or duration like 0:58:10), plus either <b>class_id</b>, or <b>meet_link</b> (or meet_code) and <b>date</b>. The teacher is matched by the email on their teacher profile.</p>
+        ${field('CSV file', '<input type="file" accept=".csv,text/csv" id="meet-file" required>')}<div id="meet-prev" class="callout" hidden></div>`,
+      onOpen: (form) => { $('#meet-file', form).onchange = async (e) => { const rows2 = parseCsv(await e.target.files[0].text());
+        form.dataset.rows = JSON.stringify(rows2.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k.toLowerCase().replace(/[^a-z0-9]+/g, '_'), v])))
+          .map((r) => ({ class_id: r.class_id, meet_link: r.meet_link, meet_code: r.meet_code || r.meeting_code, date: r.date, email: r.email || r.participant_email, minutes: r.minutes || r.duration })));
+        const pv = $('#meet-prev', form); pv.hidden = false; pv.textContent = `${rows2.length} rows ready`; }; },
+      onSubmit: async (f, form) => { const records = JSON.parse(form.dataset.rows || '[]'); if (!records.length) throw new Error('Choose a CSV file');
+        const r = await post('/classes/meet-attendance', { records }); toast(`${r.classes} classes matched, ${r.marked} updated${r.unmatched ? `, ${r.unmatched} rows unmatched` : ''}`); reload(); } }));
     $('#cf').onsubmit = (e) => { e.preventDefault(); location.hash = `#/classes?${new URLSearchParams(Object.entries(formData(e.target)).filter(([, v]) => v))}`; };
     $('#exp') && ($('#exp').onclick = () => openDoc('/export/classes.csv', 'classes.csv'));
   }
@@ -1085,8 +1497,23 @@
         <div class="grid3">${field('Subjects (comma separated)', input('subjects', t.subjects))}${field('Grades', input('grades', t.grades, 'text', 'placeholder="6,7,8"'))}${field('Boards', input('boards', t.boards, 'text', 'placeholder="CBSE,ICSE"'))}</div>
         <div class="grid3">${field('Rate per hour', input('rate_per_hour', t.rate_per_hour, 'number', 'min="0" step="0.01"'))}${field('Demo class rate', input('demo_rate', t.demo_rate, 'number', 'min="0"'))}${field('Availability', input('availability', t.availability, 'text', 'placeholder="Mon–Fri 4–9pm"'))}</div>
         <div class="grid3">${field('Phone', input('phone', t.phone))}${field('Email', input('email', t.email, 'email'))}${field('Bank / UPI details', input('bank_details', t.bank_details))}</div>
-        <p class="small muted">Payout currency follows country: UAE → AED, India → INR. Currencies are never mixed in one payout.</p>`,
-      onSubmit: async (f) => { if (t.id) await api('PATCH', `/teachers/${t.id}`, f); else await post('/teachers', f); S.meta = await get('/meta'); toast('Teacher saved'); reload(); },
+        <p class="small muted">Payout currency follows country: UAE → AED, India → INR. Currencies are never mixed in one payout. Email must match the teacher's Google account for Meet attendance. Bank details are stored encrypted.</p>
+        <h3 style="margin-top:14px">Rate rules (optional)</h3><p class="small muted">Leave blank fields to match anything. The most specific matching rule wins; otherwise the rate per hour above applies.</p>
+        <div id="rates">${[0, 1, 2, 3].map((i) => `<div class="grid3" style="grid-template-columns:1fr 1fr 1fr 1fr">${field('Subject', input(`r_subject_${i}`, '', 'text', 'placeholder="Maths"'))}${field('Grade', input(`r_grade_${i}`, '', 'text', 'placeholder="12"'))}
+          ${field('Batch', select(`r_batch_${i}`, [['1:1', '1:1'], ['Batch', 'Batch']], '', 'Any'))}${field('Rate', input(`r_rate_${i}`, '', 'number', 'min="0" step="0.01"'))}</div>`).join('')}</div>`,
+      onOpen: async (form) => {
+        if (!t.id) return;
+        const rules = await get(`/teachers/${t.id}/rates`);
+        rules.slice(0, 4).forEach((r, i) => { form[`r_subject_${i}`].value = r.subject || ''; form[`r_grade_${i}`].value = r.grade || ''; form[`r_batch_${i}`].value = r.batch_type || ''; form[`r_rate_${i}`].value = r.rate; });
+      },
+      onSubmit: async (f) => {
+        const rates = [0, 1, 2, 3].map((i) => ({ subject: f[`r_subject_${i}`], grade: f[`r_grade_${i}`], batch_type: f[`r_batch_${i}`], rate: f[`r_rate_${i}`] })).filter((r) => Number(r.rate) > 0);
+        for (const k of Object.keys(f)) if (k.startsWith('r_')) delete f[k];
+        if (!f.bank_details) delete f.bank_details;
+        const saved = t.id ? await api('PATCH', `/teachers/${t.id}`, f) : await post('/teachers', f);
+        await api('PUT', `/teachers/${saved.id || t.id}/rates`, { rates });
+        S.meta = await get('/meta'); toast('Teacher saved'); reload();
+      },
     });
   }
   async function pageTeachers() {
@@ -1095,8 +1522,16 @@
       <div class="table-wrap"><table><thead><tr><th>Teacher</th><th>Subjects</th><th>Grades / boards</th><th>Availability</th>${can('payouts.view') ? '<th class="r">Rate/hr</th>' : ''}<th class="r">Students</th><th class="r">Paid hrs this month</th><th>Status</th><th></th></tr></thead><tbody>
       ${rows.map((t) => `<tr><td><b>${esc(t.name)}</b><div class="small muted">${esc(t.country)} · ${esc(t.currency)}</div></td><td>${esc(t.subjects || '')}</td><td class="small">${esc(t.grades || '')}<div class="muted">${esc(t.boards || '')}</div></td>
         <td class="small">${esc(t.availability || '')}</td>${can('payouts.view') ? `<td class="r num">${money(t.rate_per_hour, t.currency)}</td>` : ''}<td class="r num">${t.active_students}</td><td class="r num">${t.month_hours}</td><td>${pill(t.status)}</td>
-        <td class="r">${can('teachers.edit') ? `<button class="small" data-edit="${t.id}">Edit</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`);
+        <td class="r" style="white-space:nowrap">${can('teachers.edit') ? `<button class="small" data-edit="${t.id}">Edit</button> <button class="small" data-portal="${t.id}">Class link</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`);
     $('#nt') && ($('#nt').onclick = () => teacherModal());
+    $$('[data-portal]').forEach((b) => { b.onclick = async () => {
+      const r = await get(`/teachers/${b.dataset.portal}/portal-link`);
+      const url = location.origin + r.path;
+      modal({ title: 'Teacher class link', body: `<p class="small muted">The teacher opens this after each class to confirm it in one tap. It shows only the child's first name, grade and subject – never parent contacts. It is sent automatically on WhatsApp when classes are scheduled.</p>
+        <input readonly value="${esc(url)}" id="plink"><div style="display:flex;gap:8px;margin-top:10px"><button class="primary" id="pcopy">Copy link</button><button id="prot" class="danger">Make a new link</button></div>` });
+      $('#pcopy').onclick = () => { navigator.clipboard?.writeText(url); toast('Link copied'); };
+      $('#prot').onclick = async () => { if (!confirm('The old link stops working. Continue?')) return; const n = await post(`/teachers/${b.dataset.portal}/portal-link/rotate`); $('#plink').value = location.origin + n.path; toast('New link created'); };
+    }; });
     $$('[data-edit]').forEach((b) => { b.onclick = () => teacherModal(rows.find((t) => String(t.id) === b.dataset.edit)); });
   }
 
@@ -1105,8 +1540,8 @@
     const p = qs();
     const tab = p.tab || 'payments';
     const month = p.month || new Date().toISOString().slice(0, 7);
-    const head = `<div class="page-head"><div><h1>Accounts</h1></div>${can('dashboard.team') ? '<div class="actions"><button id="exp">Export payments CSV</button></div>' : ''}</div>
-      <nav class="views">${[['payments', 'All payments'], ['due', 'Instalments due'], ['refunds', 'Refunds'], ...(can('expenses.edit') ? [['expenses', 'Expenses']] : []), ...(can('reports.finance') ? [['report', 'Monthly report']] : [])]
+    const head = `<div class="page-head"><div><h1>Accounts</h1></div>${can('exports') ? '<div class="actions"><button id="exp">Export payments CSV</button></div>' : ''}</div>
+      <nav class="views">${[['payments', 'All payments'], ...(can('payments.approve') ? [['verify', 'To verify']] : []), ['due', 'Instalments due'], ['refunds', 'Refunds'], ...(can('expenses.edit') ? [['expenses', 'Expenses']] : []), ...(can('reports.finance') ? [['report', 'Monthly report']] : [])]
     .map(([v, l]) => `<a href="#/accounts?tab=${v}" class="${v === tab ? 'on' : ''}">${l}</a>`).join('')}</nav>`;
     if (tab === 'expenses') {
       const rows = await get(`/expenses?month=${month}`);
@@ -1128,9 +1563,19 @@
             ${Object.entries(r.cac).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="r num">${v.spendAED.toLocaleString()}</td><td class="r num">${v.conversions}</td><td class="r num">${v.cacAED === null ? '—' : v.cacAED.toLocaleString()}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">Add ad spend under Expenses.</td></tr>'}</tbody></table></div></div>
         <p class="muted small">Net margin = revenue – refunds – teacher payouts – expenses (ad spend, tools, salaries). Combined at 1 AED = ${S.meta.exchangeRate.INR_PER_AED} INR.</p>`);
     } else {
-      const query = tab === 'due' ? '?due=3' : tab === 'refunds' ? '' : '';
+      const query = tab === 'due' ? '?due=3' : tab === 'verify' ? '?verify=1' : '';
       let rows = await get(`/payments${query}`);
       if (tab === 'refunds') rows = rows.filter((x) => x.status.startsWith('Refund'));
+      if (tab === 'verify') {
+        setPage(`${head}<p class="muted">Payments recorded by sales. Check each one against the bank statement or payment gateway, then verify. Target: within 24 hours.</p>
+          <div class="table-wrap">${rows.length ? `<table><thead><tr><th>Invoice</th><th>Student</th><th class="r">Amount</th><th>Method · reference</th><th>Received</th><th>Recorded by</th><th></th></tr></thead><tbody>
+          ${rows.map((x) => `<tr><td>${esc(x.invoice_no)}</td><td><a href="#/students/${x.student_id}">${esc(x.child_name || '')}</a></td><td class="r num">${money(x.amount, x.currency)}</td>
+            <td class="small">${esc([x.method, x.reference].filter(Boolean).join(' · '))}</td><td class="${(Date.now() - new Date(x.paid_at)) > 864e5 ? 'due-over' : ''}">${dt(x.paid_at)}</td><td>${esc(x.collected_by_name || '—')}</td>
+            <td class="r"><button class="small primary" data-vf="${x.id}">Verify</button></td></tr>`).join('')}</tbody></table>` : '<div class="empty">Every received payment is verified.</div>'}</div>`);
+        $$('[data-vf]').forEach((b) => { b.onclick = async () => { await post(`/payments/${b.dataset.vf}/verify`); toast('Payment verified'); reload(); }; });
+        $('#exp') && ($('#exp').onclick = () => openDoc('/export/payments.csv', 'payments.csv'));
+        return;
+      }
       setPage(`${head}${tab === 'due' ? '<p class="muted">Pending instalments overdue or due in the next 3 days. Parents and Accounts are reminded 3 days before, on the day and when overdue.</p>' : ''}
         <div class="table-wrap">${paymentTable(rows, { student: true })}</div>`);
       bindPayments();
@@ -1142,12 +1587,14 @@
   // ---------------- payouts ----------------
   async function pagePayouts() {
     const p = qs();
-    const month = p.month || new Date().toISOString().slice(0, 7);
+    const cycle = S.settings?.payouts?.cycle || 'monthly';
+    const nowIso = new Date().toISOString();
+    const month = p.month || (cycle === 'fortnightly' ? `${nowIso.slice(0, 7)}-${Number(nowIso.slice(8, 10)) <= 15 ? 'H1' : 'H2'}` : nowIso.slice(0, 7));
     const [rows, live, rec] = await Promise.all([get(`/payouts?month=${month}`), get(`/payouts/live?month=${month}`), get(`/payouts/reconcile?month=${month}`)]);
     const mism = rec.filter((r) => r.mismatch);
     setPage(`<div class="page-head"><div><h1>Teacher payouts</h1><div class="muted">Built from attendance: only classes that qualify for pay</div></div>
       <div class="actions">${can('payouts.adjust') ? '<button class="primary" id="gen">Generate statements</button>' : ''}</div></div>
-      <form class="filters" id="pf"><input type="month" name="month" value="${month}"><button>Show month</button></form>
+      <form class="filters" id="pf"><input type="month" name="month" value="${month.slice(0, 7)}">${cycle === 'fortnightly' || month.length > 7 ? select('half', [['H1', '1st – 15th'], ['H2', '16th – end'], ['', 'Whole month']], month.slice(8)) : ''}<button>Show period</button></form>
       ${mism.length ? `<div class="callout red">Attendance and payout hours don't match for ${mism.map((m) => esc(m.name)).join(', ')}. Regenerate the statements after attendance changes.</div>` : rows.length ? '<div class="callout green">Payout hours reconcile with attendance.</div>' : ''}
       <div class="table-wrap">${rows.length ? `<table><thead><tr><th>Teacher</th><th>Currency</th><th class="r">Hours</th><th class="r">Gross</th><th class="r">Adjustments</th><th class="r">Net payable</th><th>Status</th><th></th></tr></thead><tbody>
         ${rows.map((x) => `<tr><td><b>${esc(x.teacher_name)}</b><div class="small muted">${esc(x.country)}${x.locked ? ' · locked' : ''}</div></td><td>${esc(x.currency)}</td><td class="r num">${x.hours}</td>
@@ -1162,7 +1609,7 @@
       <h2 style="margin-top:22px">Running totals from attendance</h2>
       <div class="table-wrap"><table><thead><tr><th>Teacher</th><th class="r">Paid hours</th><th class="r">Gross so far</th><th>Breakdown</th></tr></thead><tbody>
         ${live.map((t) => `<tr><td>${esc(t.name)}</td><td class="r num">${t.hours}</td><td class="r num">${money(t.gross, t.currency)}</td><td class="small">${t.lines.map((l) => `${esc(l.student)} · ${esc(l.subject)}: ${l.hours}h${l.demo ? ' (demo)' : ''}`).join('<br>') || '—'}</td></tr>`).join('')}</tbody></table></div>`);
-    $('#pf').onsubmit = (e) => { e.preventDefault(); location.hash = `#/payouts?month=${e.target.month.value}`; };
+    $('#pf').onsubmit = (e) => { e.preventDefault(); const h = e.target.half?.value; location.hash = `#/payouts?month=${e.target.month.value}${h ? `-${h}` : ''}`; };
     const g = $('#gen'); if (g) g.onclick = async () => { const r = await post('/payouts/generate', { month }); toast(`${r.length} statements ready`); reload(); };
     $$('[data-adj]').forEach((b) => { b.onclick = () => { const x = rows.find((r) => String(r.id) === b.dataset.adj); modal({ title: `Adjust – ${x.teacher_name}`,
       body: `${field(`Adjustment (${x.currency}, use minus for penalty)`, input('adjustments', x.adjustments, 'number', 'step="0.01"'))}${field('Reason', input('note', x.adjustment_note || '', 'text', 'placeholder="Bonus, absence penalty, demo rate…"'))}`,
@@ -1185,8 +1632,10 @@
         <div class="grid2">${field(u.id ? 'New password (optional)' : 'Password', input('password', '', 'password', u.id ? '' : 'required'))}${u.id ? field('Status', select('active', [[1, 'Active'], [0, 'Inactive']], u.active)) : '<div></div>'}</div>`,
       onSubmit: async (f) => { if (u.id) await api('PATCH', `/users/${u.id}`, { ...f, active: f.active === undefined ? undefined : Number(f.active) }); else await post('/users', f); S.meta = await get('/meta'); toast('User saved'); reload(); } });
     setPage(`<div class="page-head"><div><h1>Users & roles</h1><div class="muted">Sales executives with a market join that market's round-robin</div></div><div class="actions"><button class="primary" id="nu">New user</button><button id="run">Run automation now</button></div></div>
-      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Market</th><th>Status</th><th></th></tr></thead><tbody>
-      ${rows.map((u) => `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(S.meta.roles[u.role])}</td><td>${esc(u.market || '—')}</td><td>${u.active ? pill('Active') : pill('Inactive')}</td><td class="r"><button class="small" data-u="${u.id}">Edit</button></td></tr>`).join('')}</tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Market</th><th>Two-step</th><th>Status</th><th></th></tr></thead><tbody>
+      ${rows.map((u) => `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(S.meta.roles[u.role])}</td><td>${esc(u.market || '—')}</td>
+        <td>${u.totp_enabled ? '<span class="pill green">On</span>' : ['owner', 'admin', 'accounts'].includes(u.role) ? '<span class="pill amber">Required at next sign-in</span>' : '<span class="pill">Optional</span>'}</td>
+        <td>${u.active ? pill('Active') : pill('Inactive')}</td><td class="r" style="white-space:nowrap"><button class="small" data-u="${u.id}">Edit</button>${u.totp_enabled ? ` <button class="small" data-r2="${u.id}">Reset 2FA</button>` : ''}</td></tr>`).join('')}</tbody></table></div>
       <div class="panel" style="margin-top:16px"><h2>What each role can do</h2><dl class="fields">
         <dt>Sales Executive</dt><dd>Own leads, log calls and WhatsApp, follow-ups, KYC capture, convert, retention follow-ups. Cannot assign teachers, see payouts or edit attendance.</dd>
         <dt>Sales Manager</dt><dd>All leads, reassign, approve instalment plans and refunds, team dashboard. Cannot edit payouts.</dd>
@@ -1196,6 +1645,7 @@
     $('#nu').onclick = () => userModal();
     $('#run').onclick = async () => { const r = await post('/automation/run'); toast(`Automation ran: ${r.leadRules.reassigned} reassigned, ${r.followUps} reminders`); };
     $$('[data-u]').forEach((b) => { b.onclick = () => userModal(rows.find((u) => String(u.id) === b.dataset.u)); });
+    $$('[data-r2]').forEach((b) => { b.onclick = async () => { if (!confirm('Reset two-step sign-in? They will set it up again at next sign-in (lost phone).')) return; await post(`/users/${b.dataset.r2}/reset-2fa`); toast('2FA reset'); reload(); }; });
   }
 
   setInterval(() => { if (S.me) refreshBell(); }, 60000);

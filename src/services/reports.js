@@ -29,11 +29,12 @@ function dashboard({ period = 'month', from, to, rep, country, source, user }) {
   const lw = lf.length ? ` AND ${lf.join(' AND ')}` : '';
 
   // Sales activity
-  const acts = q.all(`SELECT a.type, a.outcome, a.meta FROM activities a JOIN leads l ON l.id=a.entity_id
+  const acts = q.all(`SELECT a.type, a.outcome, a.meta, a.body, a.needs_note FROM activities a JOIN leads l ON l.id=a.entity_id
     WHERE a.entity='lead' AND a.type IN ('call','whatsapp') AND a.created_at>=? AND a.created_at<? ${lw}${scopeRep ? ' AND a.user_id=?' : ''}`,
   a, b, ...lp, ...(scopeRep ? [scopeRep] : []));
   const calls = acts.filter((x) => x.type === 'call');
   const connected = calls.filter((x) => String(x.outcome).startsWith('Connected')).length;
+  const noted = calls.filter((x) => String(x.outcome).startsWith('Connected') && !x.needs_note && String(x.body || '').trim()).length;
   const talk = calls.reduce((s, x) => s + (JSON.parse(x.meta || '{}').duration_min || 0), 0);
   const assigned = q.all(`SELECT assigned_at, first_call_at FROM leads l WHERE assigned_at>=? AND assigned_at<? ${lw}`, a, b, ...lp);
   const withinSla = assigned.filter((l) => l.first_call_at && (new Date(l.first_call_at) - new Date(l.assigned_at)) / 60000 <= config.sla.firstCallMinutes).length;
@@ -41,13 +42,13 @@ function dashboard({ period = 'month', from, to, rep, country, source, user }) {
   const openFU = q.get(`SELECT
       SUM(CASE WHEN next_follow_up_at < ? THEN 1 ELSE 0 END) overdue,
       SUM(CASE WHEN next_follow_up_at >= ? AND next_follow_up_at < ? THEN 1 ELSE 0 END) due_today
-    FROM leads l WHERE stage NOT IN ('Converted','Lost') AND next_follow_up_at IS NOT NULL ${lw}`,
+    FROM leads l WHERE archived=0 AND stage NOT IN ('Converted','Lost') AND next_follow_up_at IS NOT NULL ${lw}`,
   t, t, addDays(t.slice(0, 10) + 'T00:00:00.000Z', 1), ...lp);
 
   // Pipeline
-  const newLeads = q.all(`SELECT source, stage, lost_reason FROM leads l WHERE created_at>=? AND created_at<? ${lw}`, a, b, ...lp);
+  const newLeads = q.all(`SELECT source, stage, lost_reason FROM leads l WHERE archived=0 AND created_at>=? AND created_at<? ${lw}`, a, b, ...lp);
   const by = (arr, k) => arr.reduce((m, r) => { m[r[k] || '—'] = (m[r[k] || '—'] || 0) + 1; return m; }, {});
-  const stageNow = q.all(`SELECT stage, COUNT(*) n FROM leads l WHERE 1=1 ${lw} GROUP BY stage`, ...lp);
+  const stageNow = q.all(`SELECT stage, COUNT(*) n FROM leads l WHERE archived=0 ${lw} GROUP BY stage`, ...lp);
   const demoReached = newLeads.filter((l) => ['Demo Scheduled', 'Demo Done', 'Negotiation', 'Payment Pending', 'Converted'].includes(l.stage)).length;
   const converted = newLeads.filter((l) => l.stage === 'Converted').length;
   const expiring = q.get(`SELECT COUNT(*) n FROM leads l WHERE stage NOT IN ('Converted','Lost','Nurture') AND assigned_at <= ? AND assigned_at > ? ${lw}`,
@@ -96,6 +97,7 @@ function dashboard({ period = 'month', from, to, rep, country, source, user }) {
       dials: calls.length, connected, notAnswered: calls.filter((x) => x.outcome === 'Not answered').length,
       whatsappSent: acts.filter((x) => x.type === 'whatsapp').length,
       whatsappReplied: acts.filter((x) => x.type === 'whatsapp' && x.outcome === 'Replied').length,
+      notesPct: connected ? Math.round((noted / connected) * 100) : null,
       talkMinutes: talk, slaPct: assigned.length ? Math.round((withinSla / assigned.length) * 100) : null,
       followUpsOverdue: openFU.overdue || 0, followUpsDueToday: openFU.due_today || 0,
       followUpsDone: calls.length + acts.filter((x) => x.type === 'whatsapp').length,

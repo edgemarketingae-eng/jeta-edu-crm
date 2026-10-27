@@ -1,7 +1,7 @@
 // Printable invoice / receipt and teacher payout statement (browser "Save as PDF").
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmt = (n, c) => `${c} ${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const BRAND = process.env.BRAND_NAME || 'Jeta Edu';
+const BRAND_NAME = () => require('./services/settings').get('company').name;
 
 const shell = (title, body) => `<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>
 <style>
@@ -13,23 +13,35 @@ th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#667085}td
 .badge.pending{background:#fffaeb;color:#b54708}@media print{.noprint{display:none}}
 </style></head><body>${body}<p class="noprint" style="margin-top:40px"><button onclick="print()">Print / Save as PDF</button></p></body></html>`;
 
-function invoice(p) {
+function invoice(p, origin = '') {
+  const c = require('./services/settings').get('company');
+  if (c.logo_url && c.logo_url.startsWith('/')) c.logo_url = origin + c.logo_url;
   const paid = ['Paid', 'Partial'].includes(p.status);
+  const vat = Number(p.vat_amount || 0);
+  const net = p.amount - vat;
+  const logo = c.logo_url ? `<img src="${esc(c.logo_url)}" alt="" style="height:48px;border-radius:8px;margin-bottom:8px">` : '';
   return shell(`${p.invoice_no}`, `
-  <div class="row"><div><h1>${esc(BRAND)}</h1><div class="muted">${paid ? 'Receipt' : 'Invoice'} ${esc(p.invoice_no)}</div></div>
-  <div style="text-align:right"><span class="badge ${paid ? '' : 'pending'}">${esc(p.status)}</span><div class="muted">${esc((p.paid_at || p.created_at || '').slice(0, 10))}</div></div></div>
+  <div class="row"><div>${logo}<h1>${esc(c.legal_name || c.name)}</h1>
+    <div class="muted" style="white-space:pre-line">${esc(c.address || '')}</div>
+    ${c.trn ? `<div class="muted">TRN ${esc(c.trn)}</div>` : ''}
+    <div class="muted">${esc([c.phone, c.email, c.website].filter(Boolean).join(' · '))}</div></div>
+  <div style="text-align:right"><div style="font-size:20px;font-weight:700">${vat ? 'Tax ' : ''}${paid ? 'Receipt' : 'Invoice'}</div>
+    <div class="muted">${esc(p.invoice_no)}</div><div class="muted">${esc((p.paid_at || p.created_at || '').slice(0, 10))}</div>
+    <div style="margin-top:6px"><span class="badge ${paid ? '' : 'pending'}">${esc(p.status)}</span></div></div></div>
   <div class="row"><div><div class="muted">Billed to</div><strong>${esc(p.parent_name)}</strong><br>${esc(p.email || '')}<br>${esc(p.city || '')}</div>
-  <div><div class="muted">Student</div><strong>${esc(p.child_name)}</strong></div></div>
+  <div style="text-align:right"><div class="muted">Student</div><strong>${esc(p.child_name)}</strong></div></div>
   <table><tr><th>Description</th><th class="n">Hours</th><th class="n">Amount</th></tr>
-  <tr><td>${esc(p.kind || 'Tuition')} package – ${esc(p.subjects || '')}${p.instalment_no > 1 ? ` (instalment ${p.instalment_no})` : ''}</td><td class="n">${esc(p.hours ?? '')}</td><td class="n">${fmt(p.amount, p.currency)}</td></tr>
-  <tr class="total"><td colspan="2">Total</td><td class="n">${fmt(p.amount, p.currency)}</td></tr></table>
-  ${paid ? `<p class="muted">Paid via ${esc(p.method)} · Ref ${esc(p.reference)}</p>` : `<p class="muted">Due ${esc(p.due_date || 'on receipt')}</p>`}`);
+  <tr><td>${esc(p.kind || 'Tuition')} package – ${esc(p.subjects || '')}${p.instalment_no > 1 ? ` (instalment ${p.instalment_no})` : ''}</td><td class="n">${esc(p.hours ?? '')}</td><td class="n">${fmt(vat ? net : p.amount, p.currency)}</td></tr>
+  ${vat ? `<tr><td colspan="2">VAT ${esc(c.vat_rate)}%</td><td class="n">${fmt(vat, p.currency)}</td></tr>` : ''}
+  <tr class="total"><td colspan="2">Total${vat ? ' (incl. VAT)' : ''}</td><td class="n">${fmt(p.amount, p.currency)}</td></tr></table>
+  ${paid ? `<p class="muted">Paid via ${esc(p.method)} · Ref ${esc(p.reference)}</p>` : `<p class="muted">Due ${esc(p.due_date || 'on receipt')}</p>`}
+  ${c.footer ? `<p class="muted" style="margin-top:28px;border-top:1px solid #e4e7ec;padding-top:12px">${esc(c.footer)}</p>` : ''}`);
 }
 
 function statement(p) {
   const rows = p.lines.map((l) => `<tr><td>${esc(l.student)}${l.demo ? ' (demo)' : ''}</td><td>${esc(l.subject)}</td><td class="n">${l.hours}</td><td class="n">${fmt(l.rate, p.currency)}</td><td class="n">${fmt(l.gross, p.currency)}</td></tr>`).join('');
   return shell(`Payout ${p.teacher_name} ${p.month}`, `
-  <div class="row"><div><h1>${esc(BRAND)}</h1><div class="muted">Teacher payout statement · ${esc(p.month)}</div></div>
+  <div class="row"><div><h1>${esc(BRAND_NAME())}</h1><div class="muted">Teacher payout statement · ${esc(p.month)}</div></div>
   <div style="text-align:right"><span class="badge ${p.status === 'Paid' ? '' : 'pending'}">${esc(p.status)}</span></div></div>
   <div><strong>${esc(p.teacher_name)}</strong> · ${esc(p.country)} · ${esc(p.currency)}</div>
   <table><tr><th>Student</th><th>Subject</th><th class="n">Hours</th><th class="n">Rate/hr</th><th class="n">Gross</th></tr>${rows}

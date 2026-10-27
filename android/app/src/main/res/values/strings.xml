@@ -1,0 +1,3 @@
+<resources>
+    <string name="notice">This app runs on your company phone. It reads the phone\'s call log and sends the CRM only calls to or from parents and students already in the CRM: number, direction, time and duration. Personal calls are filtered out on this phone and never leave it. It does not record calls or read messages. You can see everything it has sent below.</string>
+</resources>

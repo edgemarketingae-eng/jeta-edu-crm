@@ -49,9 +49,30 @@ module.exports = {
     'Connected - Call back later': { requiresFollowUp: true },
     'Connected - Not interested':  { requiresLostReason: true },
     'Not answered':                { stage: 'Attempted', retryMinutes: 120, whatsappTask: true, failed: true },
-    'Busy / Switched off':         { stage: 'Attempted', retryMinutes: 180, failed: true },
+    'Busy':                        { stage: 'Attempted', retryMinutes: 180, failed: true },
+    'Switched off':                { stage: 'Attempted', retryMinutes: 180, failed: true },
     'Wrong number':                { flag: true, failed: true },
   },
+  // Conversation log (blueprint 5.2)
+  interaction: {
+    types: { call: 'Call', whatsapp: 'WhatsApp', demo: 'Demo', email: 'Email', walkin: 'Walk-in' },
+    objections: ['Price', 'Timing', 'Trust', 'Competitor', 'Child not interested', 'Need to discuss', 'Other'],
+    sentiments: ['Positive', 'Neutral', 'Negative'],
+    minConnectedNoteChars: 60,      // "minimum 2 lines" – 2+ lines or 60+ characters
+    noteDueMinutes: 10,             // tracker calls must get a note within 10 minutes
+    managerAfterMinutes: 120,       // missing note escalates to the manager after this
+  },
+  tracker: { connectedSeconds: 20 },
+  // Meet attendance rules (blueprint 11.4)
+  meet: { presentPct: 0.8, mismatchMinutes: 10, auditPct: 0.10, pullAfterMinutes: 30 },   // a tracked call this long counts as connected
+  escalation: { hours48Action: 'flag' }, // 'flag' (manager takes over) or 'reassign'
+  compliance: {                       // scorecard targets; coaching after 2 weeks below
+    notesPct: 90, onTimeFollowUpPct: 85, firstCallSlaPct: 90,
+    teacherAssign24hPct: 95, exceptionsCleared24hPct: 90, kycVerified24hPct: 95,
+    invoices24hPct: 98, payoutsOnTimePct: 100, payoutDueDays: 5,
+  },
+  summaryHourLocal: 20,               // 8 pm end-of-day summary (per market time zone)
+
   // Not-connected cadence (6 tries, then Nurture):
   //   call 1 Day 0 → call 2 same day (outcome retry: +2h / +3h) → call 3 next day (different slot)
   //   → call 4 Day 3 (+ WhatsApp) → call 5 Day 5 → call 6 Day 7 → Nurture + manager alert.
