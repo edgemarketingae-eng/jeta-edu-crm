@@ -1,0 +1,6 @@
+# Nightly database backup at 02:30 server time, keeping 30 days.
+# PM2/systemd install – add with: crontab -u jeta deploy/backup.cron
+30 2 * * * cd /opt/jeta-crm && DB_PATH=/var/lib/jeta-crm/jeta-crm.db BACKUP_DIR=/var/backups/jeta-crm KEEP=30 /usr/bin/node --no-warnings scripts/backup.js >> /var/log/jeta-crm-backup.log 2>&1
+
+# Docker install – use this line in the host's crontab instead:
+# 30 2 * * * docker exec jeta-crm node --no-warnings scripts/backup.js >> /var/log/jeta-crm-backup.log 2>&1

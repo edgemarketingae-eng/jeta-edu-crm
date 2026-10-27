@@ -1,0 +1,16 @@
+# docker compose up -d --build
+services:
+  crm:
+    build: .
+    container_name: jeta-crm
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DB_PATH: /data/jeta-crm.db
+      BACKUP_DIR: /data/backups
+      TRUST_PROXY: "true"
+    volumes:
+      - ./data:/data            # database + backups live on the host
+    ports:
+      - "127.0.0.1:3000:3000"   # only Nginx on this server can reach it

@@ -8,7 +8,9 @@
     "start": "node --no-warnings server.js",
     "dev": "node --no-warnings --watch server.js",
     "seed": "node --no-warnings src/seed.js --reset",
-    "test": "node --no-warnings --test test/*.test.js"
+    "test": "node --no-warnings --test test/*.test.js",
+    "backup": "node --no-warnings scripts/backup.js",
+    "create-owner": "node --no-warnings scripts/create-owner.js"
   },
   "engines": {
     "node": ">=22.13.0"

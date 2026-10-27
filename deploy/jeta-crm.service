@@ -1,0 +1,21 @@
+# Alternative to PM2: systemd unit.  /etc/systemd/system/jeta-crm.service
+# systemctl daemon-reload && systemctl enable --now jeta-crm
+[Unit]
+Description=Jeta Edu CRM
+After=network.target
+
+[Service]
+Type=simple
+User=jeta
+WorkingDirectory=/opt/jeta-crm
+EnvironmentFile=/opt/jeta-crm/.env
+Environment=NODE_ENV=production HOST=127.0.0.1 DB_PATH=/var/lib/jeta-crm/jeta-crm.db BACKUP_DIR=/var/backups/jeta-crm
+ExecStart=/usr/bin/node --no-warnings server.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/jeta-crm /var/backups/jeta-crm
+
+[Install]
+WantedBy=multi-user.target

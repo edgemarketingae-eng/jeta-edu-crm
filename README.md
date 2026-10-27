@@ -9,6 +9,8 @@ Lead → Contacted → Qualified → Demo → Negotiation → Converted (Student
 
 Built with Node.js, Express, built-in SQLite (`node:sqlite`) and a plain-JavaScript single-page UI. It needs no build step and has one runtime dependency.
 
+> **Deploying on your own server?** Follow [DEPLOY.md](DEPLOY.md): Docker or PM2, Nginx + HTTPS, backups, updates and the go-live checklist.
+
 ## Run it
 
 ```bash
@@ -29,7 +31,7 @@ The first boot seeds demo data. All demo passwords are `jeta1234`.
 
 `npm run seed` wipes and reseeds. `npm test` runs the business-rule tests.
 
-For a clean production start, set `SEED_DEMO=false`, `OWNER_EMAIL` and `OWNER_PASSWORD`, then add your team under **Users & roles**.
+With `NODE_ENV=production` demo data is off by default and the first start requires `OWNER_EMAIL` and `OWNER_PASSWORD`. See DEPLOY.md.
 
 ## Environment
 

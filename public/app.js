@@ -142,7 +142,8 @@
         ${field('Email', input('email', '', 'email', 'autocomplete="username" required'))}
         ${field('Password', input('password', '', 'password', 'autocomplete="current-password" required'))}
         <button class="primary" style="width:100%">Sign in</button><div class="err" hidden></div>
-        <p class="muted small" style="margin-top:18px">Demo: owner@jeta.edu, manager@, aisha@, admin@, accounts@ – password jeta1234</p></form></div>`;
+        <p class="muted small" id="demo-hint" hidden style="margin-top:18px">Demo: owner@jeta.edu, manager@, aisha@, admin@, accounts@ – password jeta1234</p></form></div>`;
+    fetch('/api/app-info').then((r) => r.json()).then((i) => { const h = $('#demo-hint'); if (h && i.demo) h.hidden = false; }).catch(() => {});
     $('#login-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const f = formData(e.target);
