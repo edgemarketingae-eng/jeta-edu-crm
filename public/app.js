@@ -116,8 +116,10 @@
       const btn = $('button[type=submit]', form); btn.disabled = true;
       try { await onSubmit(formData(form), form); close(); } catch (err) { errEl.textContent = err.message; errEl.hidden = false; } finally { btn.disabled = false; }
     });
+    mobilize(form);
     onOpen?.(form);
-    $('input,select,textarea', form)?.focus();
+    // On phones, don't pop the keyboard over the sheet before the user chooses a field.
+    if (!window.matchMedia('(max-width: 720px)').matches) $('input,select,textarea', form)?.focus();
     return form;
   }
   const field = (label, html, cls = '') => `<div class="field ${cls}"><label>${esc(label)}</label>${html}</div>`;
@@ -170,6 +172,52 @@
     ['Admin', [['#/users', 'Users & roles', null, 'users.manage']]],
   ];
 
+  // Line icons for the phone tab bar and header (24px, stroke = currentColor).
+  const ICONS = {
+    home: '<path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v9.5h13V10"/>',
+    leads: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M16 4.8a3.5 3.5 0 0 1 0 6.4M18.5 14.8c1.6.8 2.7 2.5 3 5.2"/>',
+    pipeline: '<rect x="3" y="4" width="5" height="16" rx="1.5"/><rect x="10" y="4" width="5" height="11" rx="1.5"/><rect x="17" y="4" width="4" height="7" rx="1.5"/>',
+    tasks: '<rect x="4" y="3.5" width="16" height="17" rx="2"/><path d="m8 12 2.5 2.5L16 9"/>',
+    students: '<path d="M2.5 9 12 4.5 21.5 9 12 13.5z"/><path d="M6.5 11v5c1.5 1.6 3.4 2.5 5.5 2.5s4-.9 5.5-2.5v-5"/>',
+    classes: '<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
+    accounts: '<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10.5h18M7 15h4"/>',
+    payouts: '<circle cx="12" cy="12" r="8.5"/><path d="M14.8 9.2c-.5-.9-1.6-1.4-2.8-1.4-1.6 0-2.8.8-2.8 2.1 0 3 5.8 1.5 5.8 4.3 0 1.3-1.3 2.2-3 2.2-1.3 0-2.5-.6-3-1.6M12 6.2v1.6M12 16.4V18"/>',
+    menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+    search: '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>',
+    bell: '<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2H4.5z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    phone: '<path d="M5 3.5h3.5l1.8 4.5-2.3 1.4a11 11 0 0 0 6.6 6.6l1.4-2.3 4.5 1.8V19a1.5 1.5 0 0 1-1.6 1.5C10.4 20 4 13.6 3.5 5.1A1.5 1.5 0 0 1 5 3.5z"/>',
+    chat: '<path d="M4 19.5 5.3 16A8 8 0 1 1 8 18.7z"/>',
+    log: '<path d="M5 4h10l4 4v12H5z"/><path d="M9 12h6M9 16h4"/>',
+  };
+  const icon = (n, size = 22) => `<svg class="ico-svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n]}</svg>`;
+
+  // Four role-specific tabs + Menu (opens the full module list).
+  function bottomTabs() {
+    const r = role();
+    const sets = {
+      sales_exec: [['#/dashboard', 'Home', 'home'], ['#/leads?view=today', 'Today', 'leads', 'today'], ['#/pipeline', 'Pipeline', 'pipeline'], ['#/tasks', 'Tasks', 'tasks']],
+      admin: [['#/dashboard', 'Home', 'home'], ['#/students', 'Students', 'students'], ['#/classes', 'Classes', 'classes'], ['#/tasks', 'Tasks', 'tasks']],
+      accounts: [['#/dashboard', 'Home', 'home'], ['#/accounts', 'Accounts', 'accounts'], ['#/payouts', 'Payouts', 'payouts'], ['#/tasks', 'Tasks', 'tasks']],
+    };
+    const tabs = sets[r] || [['#/dashboard', 'Home', 'home'], ['#/leads', 'Leads', 'leads', 'overdue'], ['#/students', 'Students', 'students'], ['#/tasks', 'Tasks', 'tasks']];
+    const path = location.hash.split('?')[0];
+    return `<nav class="tabbar" aria-label="Main">${tabs.map(([href, label, ic, countKey]) => {
+      const base = href.split('?')[0];
+      const on = path === base || (base !== '#/dashboard' && path.startsWith(`${base}/`));
+      const c = countKey && S.counts[countKey] ? `<span class="badge">${S.counts[countKey]}</span>` : '';
+      return `<a href="${href}" class="${on ? 'on' : ''}" ${on ? 'aria-current="page"' : ''}>${icon(ic)}${c}<span>${label}</span></a>`;
+    }).join('')}<button type="button" id="tab-menu">${icon('menu')}<span>Menu</span></button></nav>`;
+  }
+
+  function pageTitle() {
+    const path = location.hash.split('?')[0];
+    if (/^#\/leads\/\d+/.test(path)) return 'Lead';
+    if (/^#\/students\/\d+/.test(path)) return 'Student';
+    for (const [, items] of NAV) for (const [href, label] of items) if (path === href) return label;
+    return 'Jeta Edu';
+  }
+
   function layout(content) {
     const path = location.hash.split('?')[0];
     const nav = NAV.map(([g, items]) => {
@@ -181,20 +229,63 @@
       return links ? `<div class="group">${g}</div>${links}` : '';
     }).join('');
     $('#app').innerHTML = `<div class="shell">
-      <aside class="side"><div class="brand"><span class="mark">J</span> Jeta Edu CRM</div><nav class="nav">${nav}</nav>
+      <div class="scrim" id="scrim" hidden></div>
+      <aside class="side" id="side"><div class="brand"><span class="mark">J</span> Jeta Edu CRM</div><nav class="nav">${nav}</nav>
         <div class="me"><div>${esc(S.me.name)}</div><div class="small" style="color:#9EC2B6">${esc(S.meta.roles[S.me.role])}${S.me.market ? ` · ${esc(S.me.market)}` : ''}</div>
         <button id="logout" class="small">Sign out</button></div></aside>
       <div class="main"><header class="top">
-        <input class="search" id="gsearch" placeholder="Search leads by name, phone or ID" aria-label="Search leads">
-        <div style="flex:1"></div>
-        ${can('leads.edit') ? '<button class="primary" id="quick-lead">New lead</button>' : ''}
-        <button class="bell" id="bell" aria-label="Notifications">Alerts <span class="dot" id="bell-dot" hidden></span></button>
-      </header><main class="page" id="page">${content}</main></div></div>`;
+        <span class="top-title">${esc(pageTitle())}</span>
+        <input class="search" id="gsearch" type="search" enterkeyhint="search" placeholder="Search leads by name, phone or ID" aria-label="Search leads">
+        <div class="top-spacer"></div>
+        <button class="icon-btn mobile-only" id="search-btn" aria-label="Search leads">${icon('search')}</button>
+        ${can('leads.edit') ? `<button class="primary" id="quick-lead" aria-label="New lead">${icon('plus', 18)}<span class="desk-only">New lead</span></button>` : ''}
+        <button class="bell icon-btn" id="bell" aria-label="Alerts">${icon('bell')}<span class="desk-only">Alerts</span><span class="dot" id="bell-dot" hidden></span></button>
+      </header><main class="page" id="page">${content}</main></div>${bottomTabs()}</div>`;
     $('#logout').onclick = logout;
     $('#bell').onclick = openNotifications;
     $('#quick-lead') && ($('#quick-lead').onclick = newLeadModal);
-    $('#gsearch').addEventListener('keydown', (e) => { if (e.key === 'Enter') location.hash = `#/leads?view=all&search=${encodeURIComponent(e.target.value)}`; });
+    const gs = $('#gsearch');
+    gs.addEventListener('keydown', (e) => { if (e.key === 'Enter') location.hash = `#/leads?view=all&search=${encodeURIComponent(e.target.value)}`; });
+    $('#search-btn').onclick = () => { document.body.classList.toggle('searching'); if (document.body.classList.contains('searching')) gs.focus(); };
+    gs.addEventListener('blur', () => { if (!gs.value) document.body.classList.remove('searching'); });
+    const openMenu = (open) => { $('#side').classList.toggle('open', open); $('#scrim').hidden = !open; document.body.classList.toggle('locked', open); };
+    $('#tab-menu').onclick = () => openMenu(true);
+    $('#scrim').onclick = () => openMenu(false);
+    $$('#side a').forEach((a) => a.addEventListener('click', () => openMenu(false)));
+    document.body.classList.remove('searching', 'locked');
     refreshBell();
+  }
+
+  // Phone layout helpers run after every page render.
+  // 1) Each table cell gets its column name, so CSS can show rows as labelled cards.
+  // 2) Long filter bars collapse behind a "Filters" toggle.
+  function mobilize(root) {
+    $$('table', root).forEach((t) => {
+      const heads = $$('thead th', t).map((th) => th.textContent.trim());
+      t.classList.add('cardify');
+      $$('tbody tr', t).forEach((tr) => {
+        [...tr.children].forEach((td, i) => {
+          if (td.tagName !== 'TD') return;
+          if (heads[i] && !td.dataset.label) td.dataset.label = heads[i];
+          const txt = td.textContent.trim();
+          if ((!txt || txt === '—') && !td.querySelector('button,a,input,.pill,.mini-meter')) td.classList.add('blank');
+        });
+      });
+    });
+    $$('form.filters', root).forEach((f) => {
+      if (f.previousElementSibling?.classList.contains('filter-toggle')) return;
+      const controls = $$('input:not([type=hidden]), select', f).length;
+      if (controls < 3) return;
+      const active = $$('input:not([type=hidden]), select', f).filter((el) => el.value && el.name !== 'period').length;
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'filter-toggle mobile-only';
+      b.textContent = active ? `Filters (${active})` : 'Filters';
+      b.setAttribute('aria-expanded', 'false');
+      b.onclick = () => { const open = f.classList.toggle('open'); b.setAttribute('aria-expanded', String(open)); };
+      f.before(b);
+    });
+    // Keep the current stage visible when the stage track scrolls sideways.
+    $$('.stages', root).forEach((s) => { const cur = $('.cur', s); if (cur) s.scrollLeft = cur.offsetLeft - s.offsetLeft - 24; });
   }
 
   async function refreshBell() {
@@ -240,7 +331,7 @@
   }
   window.addEventListener('hashchange', route);
   const reload = () => route();
-  const setPage = (html) => { $('#page').innerHTML = html; };
+  const setPage = (html) => { const p = $('#page'); p.innerHTML = html; mobilize(p); };
 
   // ---------------- dashboard ----------------
   function barList(obj, fmt = (v) => v) {
@@ -337,7 +428,7 @@
         ${select('stage', S.meta.leadStages, p.stage, 'Any stage')}${select('source', S.meta.leadSources, p.source, 'Any source')}
         ${role() !== 'sales_exec' ? select('owner', salesUsers(), p.owner, 'Any owner') : ''}${select('country', ['UAE', 'India'], p.country, 'Any market')}
         ${select('score', ['Hot', 'Warm', 'Cold'], p.score, 'Any score')}<button>Filter</button></form>
-      <div class="table-wrap">${rows.length ? `<table><thead><tr><th>Lead</th><th>Child</th><th>Source</th><th>Stage</th><th>Score</th><th>Owner</th><th>Next follow-up</th><th class="r">Attempts</th><th>Assigned</th></tr></thead><tbody>
+      <div class="table-wrap">${rows.length ? `<table class="lead-table"><thead><tr><th>Lead</th><th>Child</th><th>Source</th><th>Stage</th><th>Score</th><th>Owner</th><th>Next follow-up</th><th class="r">Attempts</th><th>Assigned</th></tr></thead><tbody>
         ${rows.map((l) => `<tr class="click" data-href="#/leads/${l.id}"><td><a href="#/leads/${l.id}"><b>${esc(l.parent_name)}</b></a>${l.flagged ? ' ' + pill('Flagged') : ''}<div class="small muted">${esc(l.code)} · ${esc(l.phone)}</div></td>
           <td>${esc(l.child_name || '—')}<div class="small muted">${esc([l.grade && `Gr ${l.grade}`, l.board, l.subjects].filter(Boolean).join(' · '))}</div></td>
           <td>${esc(l.source)}<div class="small muted">${esc(l.country)}</div></td><td>${pill(l.stage)}</td><td>${pill(l.score)}</td><td>${esc(l.owner_name || 'Unassigned')}</td>
@@ -377,6 +468,14 @@
     <div class="when">${dt(a.created_at)} · ${esc(a.user_name || 'System')}${a.outcome ? ` · <b>${esc(a.outcome)}</b>` : ''}</div>
     <div class="body">${esc(a.body || '')}</div></div></li>`).join('')}</ul>` : '<div class="muted small">Nothing logged yet.</div>');
 
+  // Tap-to-call and WhatsApp for a parent number. wa.me needs digits only.
+  const waLink = (phone) => `https://wa.me/${String(phone || '').replace(/\D/g, '')}`;
+  const contactLinks = (phone, isWa = true) => `<a href="tel:${esc(phone)}">${esc(phone)}</a>${isWa ? ` · <a href="${waLink(phone)}" target="_blank" rel="noopener">WhatsApp</a>` : ''}`;
+  const actionBar = (phone, isWa, logId, logLabel = 'Log call') => `<div class="actionbar mobile-only" role="toolbar" aria-label="Contact">
+    <a class="btn" href="tel:${esc(phone)}">${icon('phone', 18)}<span>Call</span></a>
+    ${isWa ? `<a class="btn" href="${waLink(phone)}" target="_blank" rel="noopener">${icon('chat', 18)}<span>WhatsApp</span></a>` : ''}
+    ${logId ? `<button class="primary" id="${logId}">${icon('log', 18)}<span>${esc(logLabel)}</span></button>` : ''}</div>`;
+
   async function pageLead(id) {
     const x = await get(`/leads/${id}`);
     const l = x.lead; const k = x.kyc;
@@ -392,8 +491,8 @@
 
     setPage(`<a class="back" href="#/leads">Back to leads</a>
       <div class="record-head"><div class="row1"><div><h1>${esc(l.parent_name)} ${pill(l.score)} ${l.flagged ? pill(`Flagged: ${l.flag_reason}`) : ''}</h1>
-        <div class="muted">${esc(l.code)} · ${esc(l.phone)}${l.is_whatsapp ? ' (WhatsApp)' : ''} · ${esc(l.email || 'no email')}</div></div>
-        <div class="actions" style="display:flex;gap:8px;flex-wrap:wrap">${editable ? `<button class="primary" id="a-call">Log call</button><button id="a-wa">Log WhatsApp</button>
+        <div class="muted">${esc(l.code)} · ${contactLinks(l.phone, l.is_whatsapp)}${l.email ? ` · ${esc(l.email)}` : ''}</div></div>
+        <div class="actions record-actions">${editable ? `<button class="primary" id="a-call">Log call</button><button id="a-wa">Log WhatsApp</button>
           ${!closed ? '<button id="a-stage">Change stage</button><button id="a-fu">Set follow-up</button>' : ''}
           ${l.stage === 'Lost' ? '<button id="a-reopen">Reopen</button>' : ''}
           ${!closed ? '<button id="a-conv">Convert</button>' : ''}` : ''}
@@ -426,7 +525,8 @@
       </div>
       <div><div class="panel"><div class="panel-head"><h2>Timeline</h2></div>
         ${editable ? '<form id="note-f" style="margin-bottom:10px"><textarea name="text" placeholder="Add a note" style="min-height:50px"></textarea><button style="margin-top:6px">Add note</button></form>' : ''}
-        ${timeline(x.activities)}</div></div></div>`);
+        ${timeline(x.activities)}</div></div></div>
+      ${actionBar(l.phone, l.is_whatsapp, editable ? 'a-call-m' : null)}`);
 
     $$('.tabs button').forEach((b) => b.addEventListener('click', () => {
       $$('.tabs button').forEach((x2) => x2.classList.toggle('on', x2 === b));
@@ -434,6 +534,7 @@
     }));
     const on = (sel, fn) => { const el = $(sel); if (el) el.onclick = fn; };
     on('#a-call', () => callModal(l));
+    on('#a-call-m', () => callModal(l));
     on('#a-wa', () => waModal(l));
     on('#a-stage', () => stageModal(l));
     on('#a-fu', () => modal({ title: 'Set follow-up', body: followUpFields(localInput(l.next_follow_up_at) || inHours(2), l.next_follow_up_type || 'call'),
@@ -635,7 +736,7 @@
       <form class="filters" id="sf"><input type="hidden" name="view" value="${esc(view)}"><input name="search" placeholder="Child, parent, ID" value="${esc(p.search || '')}">
         ${select('stage', S.meta.studentStages, p.stage, 'Any stage')}${select('retention', S.meta.retentionStages, p.retention, 'Any retention stage')}
         ${select('teacher', S.meta.teachers.map((t) => [t.id, t.name]), p.teacher, 'Any teacher')}${select('country', ['UAE', 'India'], p.country, 'Any market')}<button>Filter</button></form>
-      <div class="table-wrap">${rows.length ? `<table><thead><tr><th>Student</th><th>Subjects</th><th>Stage</th><th>Retention</th><th>Teacher</th><th>Hours</th><th>Retention owner</th></tr></thead><tbody>
+      <div class="table-wrap">${rows.length ? `<table class="student-table"><thead><tr><th>Student</th><th>Subjects</th><th>Stage</th><th>Retention</th><th>Teacher</th><th>Hours</th><th>Retention owner</th></tr></thead><tbody>
         ${rows.map((s) => `<tr class="click" data-href="#/students/${s.id}"><td><a href="#/students/${s.id}"><b>${esc(s.child_name)}</b></a><div class="small muted">${esc(s.code)} · ${esc(s.parent_name)}</div></td>
           <td>${esc(s.subjects || '')}<div class="small muted">${esc([s.grade && `Gr ${s.grade}`, s.board, s.country].filter(Boolean).join(' · '))}</div></td>
           <td>${pill(s.stage)}</td><td>${pill(s.retention_stage) || '<span class="muted">—</span>'}</td><td>${esc(s.teacher_name || '—')}${s.batch_name ? `<div class="small muted">${esc(s.batch_name)}</div>` : ''}</td>
@@ -691,8 +792,8 @@
     const ci = flow.indexOf(s.stage);
     setPage(`<a class="back" href="#/students">Back to students</a>
       <div class="record-head"><div class="row1"><div><h1>${esc(s.child_name)} ${pill(s.stage)} ${s.retention_stage ? pill(s.retention_stage) : ''}</h1>
-        <div class="muted">${esc(s.code)} · Parent ${esc(s.parent_name)}${role() !== 'admin' ? ` · ${esc(s.phone)}` : ''} · ${esc(s.country)} (${esc(s.currency)})</div></div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <div class="muted">${esc(s.code)} · Parent ${esc(s.parent_name)} · ${contactLinks(s.phone)} · ${esc(s.country)} (${esc(s.currency)})</div></div>
+        <div class="record-actions">
           ${admin ? `<button class="primary" id="b-assign">${s.teacher_id ? 'Change teacher' : 'Assign teacher'}</button>${s.teacher_id ? '<button id="b-sched">Schedule classes</button><button id="b-class">Add class</button>' : ''}<button id="b-stage">Change stage</button>` : ''}
           ${ret ? '<button id="b-rlog">Log retention call</button><button id="b-rstage">Retention stage</button><button id="b-renew">Renew</button>' : ''}
           ${s.lead_id ? `<a class="btn" href="#/leads/${s.lead_id}">Open lead</a>` : ''}</div></div>
@@ -716,7 +817,8 @@
           <dt>KYC</dt><dd>${pill(x.kyc?.status || 'Pending')}</dd><dt>Start date</dt><dd>${esc(s.start_date || '—')}</dd><dt>Time zone</dt><dd>${esc(s.timezone || '—')}</dd></dl>
           <p class="small muted" style="margin-top:12px">Parent contact details are never shown on teacher-facing documents (anti-poaching).</p></div>
         <div data-pane="3" class="panel flush" hidden>${taskTable(x.tasks)}</div></div>
-      <div><div class="panel"><h2>Timeline</h2><form id="note-f" style="margin-bottom:10px"><textarea name="text" placeholder="Add a note" style="min-height:50px"></textarea><button style="margin-top:6px">Add note</button></form>${timeline(x.activities)}</div></div></div>`);
+      <div><div class="panel"><h2>Timeline</h2><form id="note-f" style="margin-bottom:10px"><textarea name="text" placeholder="Add a note" style="min-height:50px"></textarea><button style="margin-top:6px">Add note</button></form>${timeline(x.activities)}</div></div></div>
+      ${actionBar(s.phone, true, ret ? 'b-rlog-m' : null, 'Log retention')}`);
 
     $$('.tabs button').forEach((b) => b.addEventListener('click', () => {
       $$('.tabs button').forEach((x2) => x2.classList.toggle('on', x2 === b));
@@ -752,6 +854,7 @@
     on('#b-stage', () => modal({ title: 'Change student stage', submit: 'Save stage',
       body: `${field('Stage', select('stage', S.meta.studentStages.filter((st) => st !== s.stage), '', 'Choose stage', 'required'))}${field('Reason (mandatory for Churned)', select('reason', S.meta.churnReasons, '', '—'))}`,
       onSubmit: async (f) => { await post(`/students/${s.id}/stage`, f); toast(`Stage → ${f.stage}`); reload(); } }));
+    on('#b-rlog-m', () => $('#b-rlog').click());
     on('#b-rlog', () => modal({ title: 'Log retention call / WhatsApp', submit: 'Log',
       body: `<div class="grid2">${field('Channel', select('channel', [['call', 'Call'], ['whatsapp', 'WhatsApp']], 'call'))}${field('Outcome', select('outcome', ['Happy – will renew', 'Thinking', 'Has concerns', 'Not renewing', 'No answer', 'Check-in done'], '', 'Choose', 'required'))}</div>
         ${field('Parent feedback', '<textarea name="feedback"></textarea>')}${field('Issue for Admin (creates a ticket)', select('issue', ['Teacher', 'Timing', 'Results', 'Billing', 'Other'], '', 'No issue'))}
