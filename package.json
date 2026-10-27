@@ -1,0 +1,21 @@
+{
+  "name": "jeta-edu-crm",
+  "version": "1.0.0",
+  "description": "Jeta Edu CRM – Zoho-style CRM for tuition operations: leads, follow-ups, KYC, students, teachers, attendance, retention, accounts and teacher payouts.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node --no-warnings server.js",
+    "dev": "node --no-warnings --watch server.js",
+    "seed": "node --no-warnings src/seed.js --reset",
+    "test": "node --no-warnings --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
